@@ -10,15 +10,32 @@ const padding = 0;
  
   // https://lbs.amap.com/api/webservice/guide/create-project/get-key
   var AMAP_API_KEY = "";
+  
+  var TESLA_MATE_CAR_ID = 1;
 
   // https://github.com/tobiasehlert/teslamateapi
-  var TESLA_MATE_API_URL = "http://[TeslaMate Api URL]/api/v1/cars/[CarID]/status";
+  var TESLA_MATE_API_URL = `http://[TeslaMate Api URL]/api/v1/cars/${TESLA_MATE_CAR_ID}/status`;
   
   // https://github.com/adriankumpf/teslamate
   var TESLA_MATE_URL = "http://[TeslaMate URL]"
 
   var DATA = {}
 
+}
+
+if (config.runsInApp) {
+  let wv = new WebView();
+  await wv.loadURL(TESLA_MATE_URL);
+  
+  for (var i = 1; i < 5; i++) {
+    if ( i != TESLA_MATE_CAR_ID) {
+      wv.evaluateJavaScript(`document.styleSheets[0].insertRule('#car_${i}, div.navbar-brand, footer {display: none}').insertRule('')`)
+    }
+  }
+  
+  wv.present(); 
+  
+  return;
 }
 
 let fm = FileManager.iCloud();
@@ -28,10 +45,6 @@ if(!fm.isDirectory(fileRoot)) {
 }
 
 const widget = new ListWidget();
-widget.setPadding(0, 0, 0, 0);
-widget.backgroundColor = Color.black();
-widget.url = TESLA_MATE_URL;
-
 widget.setPadding(0, 0, 0, 0);
 widget.backgroundColor = Color.black();
 widget.refreshAfterDate = new Date(Date.now() + 1000 * 60 * 1);
@@ -112,6 +125,10 @@ async function getCarGeo(lat, lng) {
   }
   
   if (json == null || car.car_geodata.latitude != car.prev_geodata.latitude) {
+    // const url = `https://restapi.amap.com/v3/geocode/regeo?output=json&extensions=all&location=${geo.longitude},${geo.latitude}&key=${AMAP_API_KEY}`;
+    // console.log(url)
+    // let req = await new Request(url);
+    // json = await req.loadString();
     let location = await Location.reverseGeocode(geo.latitude, geo.longitude, "zh-CN");
     json = JSON.stringify(location);
     fm.writeString(file, json);
@@ -120,8 +137,7 @@ async function getCarGeo(lat, lng) {
   }
 	
   let image;
-  let zoom = car.state === "driving" ? 12 : 14;
-  console.log(car.state)
+  let zoom = car.state === "driving" ? 14 : 14;
   filename = `car_map_${car.id}.png`;
   file = fm.joinPath(fileRoot, filename);    
 	
@@ -140,9 +156,12 @@ async function getCarGeo(lat, lng) {
   }
 
   return await {
+//    "geofence" : JSON.parse(json).regeocode.addressComponent.neighborhood.name,
     "geofence" : json[0].thoroughfare,
     "latitude" : geo.latitude,
     "longitude" : geo.longitude,
+    "lat" : lat,
+    "lng" : lng,
     "image" : image
   }
 }
@@ -161,7 +180,9 @@ async function getCarGeo(lat, lng) {
   if (fm.fileExists(file)) {
     let prevData = await fm.readString(file);
     prevData = JSON.parse(prevData);
-    car.prev_geodata = prevData.data.status.car_geodata;
+    if (prevData) {
+      car.prev_geodata = prevData.data.status.car_geodata;
+    }
   }
   
   //car.state = "charging";
@@ -212,12 +233,14 @@ right.setPadding(0, 0, 0, 0)
   let stack = left.addStack()
   stack.centerAlignContent();
   stack.setPadding(0, 0, 0, 0);
+  stack.size = new Size(150, 20)
   
   // Car Name
   {
-    let text = stack.addText(car.display_name)
+    let text = stack.addText(car.display_name + '                  ')
     text.font = Font.mediumSystemFont(16)
     text.lineLimit = 1;
+    text.url=TESLA_MATE_URL
   }
   
   // Sentry Mode
@@ -266,6 +289,16 @@ right.setPadding(0, 0, 0, 0)
         color = Color.green();
         break;
       }
+      case "offline": {
+        symbol = SFSymbol.named("wifi.exclamationmark.circle");
+        color = Color.red();
+        break;
+      }
+      case "updating": {
+        symbol = SFSymbol.named("arrow.up.circle");
+        color = Color.yellow();
+        break;
+      }
       default: {
         console.log(car.state)
       }
@@ -298,6 +331,8 @@ right.setPadding(0, 0, 0, 0)
   let stack = left.addStack();
   stack.centerAlignContent();
   
+  let height = 14;
+  
   {
     
     let battery = new DrawContext();
@@ -305,8 +340,8 @@ right.setPadding(0, 0, 0, 0)
       battery.opaque = false;
       battery.size = new Size(50, 16);
       let path = new Path();
-      path.addRoundedRect(new Rect(0, 0, 42, 16), 2, 2);
-      path.addRoundedRect(new Rect(43, 4, 3, 8), 1, 1);
+      path.addRoundedRect(new Rect(0, 0, 42, height), 2, 2);
+      path.addRoundedRect(new Rect(43, height / 4, 3, height / 2), 1, 1);
       battery.addPath(path)
       battery.setFillColor(car.state === "charging" ? Color.green() : Color.white());
       battery.fillPath();
@@ -319,11 +354,11 @@ right.setPadding(0, 0, 0, 0)
       
       let draw = new DrawContext();
       draw.opaque = false;
-      draw.size = new Size(42, 14);
+      draw.size = new Size(42, height - 2);
       let path = new Path();
-      path.addRoundedRect(new Rect(0, 0, width, 14), 1, 1);
+      path.addRoundedRect(new Rect(0, 0, width, height - 2), 1, 1);
       draw.addPath(path)
-      draw.setFillColor(car.state === "charging" ? Color.yellow() : Color.gray());
+      draw.setFillColor(car.state === "charging" ? Color.yellow() : Color.lightGray());
       draw.fillPath();
       
       battery.drawImageAtPoint(draw.getImage(), new Point(x, 1));
@@ -331,7 +366,7 @@ right.setPadding(0, 0, 0, 0)
       battery.setTextAlignedCenter();
       battery.setTextColor(Color.black());
       
-      battery.drawText(`${car.battery_details.battery_level}`, new Point(14, 1))
+      battery.drawText(`${car.battery_details.battery_level}`, new Point(14, 0))
       
     }
     
@@ -341,9 +376,9 @@ right.setPadding(0, 0, 0, 0)
       
       let draw = new DrawContext();
       draw.opaque = false;
-      draw.size = new Size(42, 14);
+      draw.size = new Size(42, height - 2);
       let path = new Path();
-      path.addRoundedRect(new Rect(0, 0, width, 14), 1, 1);
+      path.addRoundedRect(new Rect(0, 0, width, height - 2), 1, 1);
       draw.addPath(path)
       draw.setFillColor(Color.black());
       draw.fillPath();
@@ -352,12 +387,12 @@ right.setPadding(0, 0, 0, 0)
     }
     
     let image = stack.addImage(battery.getImage())
-    image.imageSize = new Size(50, 16)
+    image.imageSize = new Size(50, height)
   }
   
   {
     stack.addSpacer(5);
-    let text = stack.addText(`${car.battery_details.rated_battery_range} km`)
+    let text = stack.addText(`${car.battery_details.rated_battery_range} km             `)
     text.textColor = car.state === "charging" ? Color.green() : Color.white();
     text.font = Font.mediumSystemFont(12)
   }
@@ -367,13 +402,29 @@ right.setPadding(0, 0, 0, 0)
 // Charging Status
 {
   if (car.state === "charging") {
-    left.addSpacer(5)
-  
-    let stack = left.addStack();
+
+    let time = Math.floor(car.charging_details.time_to_full_charge * 60);
+    let hour = Math.floor(time / 60);
+    let min  = time - hour * 60;
+    let timeText = "";
+    if (hour > 0) {
+      timeText = `${hour}h`;
+    }
+    if (min > 0) {
+      timeText = timeText + `${min}m`;
+    }
     
-    let text = stack.addText(`${car.charging_details.charge_energy_added} kWh → ${car.charging_details.charge_limit_soc}% (${car.charging_details.time_to_full_charge})`)
-    text.font = Font.mediumSystemFont(12)
-    text.textColor = Color.green();
+    left.addSpacer(5)
+    let line1 = left.addText(` ${car.charging_details.charger_power}kW · ${car.charging_details.charger_actual_current}A · ${car.charging_details.charge_limit_soc}%          `)
+    line1.lineLimit = 1;
+    line1.font = Font.mediumSystemFont(12)
+    line1.textColor = Color.green();
+
+    left.addSpacer(5)
+    let line2 = left.addText(` ${car.charging_details.charge_energy_added}kWh · ${timeText}          `)
+    line2.lineLimit = 1;
+    line2.font = Font.mediumSystemFont(12)
+    line2.textColor = Color.green();
   }
 }
 
@@ -468,7 +519,7 @@ right.setPadding(0, 0, 0, 0)
     text.font = Font.mediumSystemFont(12)
     text.textColor = Color.gray();
     text.lineLimit = 2;
-    text.url = `http://maps.apple.com/?ll=${car.car_geodata.latitude},${car.car_geodata.longitude}&q=` + encodeURI(car.display_name);
+    //text.url = `http://maps.apple.com/?ll=${car.car_geodata.latitude},${car.car_geodata.longitude}&q=` + encodeURI(car.display_name);
   }
  
   
@@ -485,17 +536,8 @@ right.setPadding(0, 0, 0, 0)
     image.url = `http://maps.apple.com/?ll=${car.car_geodata.latitude},${car.car_geodata.longitude}&q=` + encodeURI(car.display_name);
   }
     
-} 
-
-
-
-
-if (config.runsInWidget) {
-  Script.setWidget(widget)
-} else {
-  widget.presentMedium()
 }
+
+Script.setWidget(widget)
+widget.presentMedium()
 Script.complete();
-  
-
-
