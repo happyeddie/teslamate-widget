@@ -14,10 +14,10 @@ const padding = 0;
   var TESLA_MATE_CAR_ID = 1;
 
   // https://github.com/tobiasehlert/teslamateapi
-  var TESLA_MATE_API_URL = `http://[TeslaMate Api URL]/api/v1/cars/${TESLA_MATE_CAR_ID}/status`;
+  var TESLA_MATE_API_URL = `http(s)://[TeslaMate Api URL]/api/v1/cars/${TESLA_MATE_CAR_ID}/status`;
   
   // https://github.com/adriankumpf/teslamate
-  var TESLA_MATE_URL = "http://[TeslaMate URL]"
+  var TESLA_MATE_URL = "http(s)://[TeslaMate URL]"
 
   var DATA = {}
 
@@ -243,17 +243,6 @@ right.setPadding(0, 0, 0, 0)
     text.url=TESLA_MATE_URL
   }
   
-  // Sentry Mode
-  {
-    if (car.car_status.sentry_mode === true) {
-      stack.addSpacer(8)
-      let symbol = SFSymbol.named("eye.circle");
-      let img = stack.addImage(symbol.image);
-      img.tintColor = Color.red()
-      img.imageSize = new Size(16, 16);
-    }
-  }
-  
   // Car State
   {
     stack.addSpacer(8)
@@ -302,6 +291,12 @@ right.setPadding(0, 0, 0, 0)
       default: {
         console.log(car.state)
       }
+    }
+    
+    // Sentry Mode
+    if (car.car_status.sentry_mode === true) {
+      symbol = SFSymbol.named("record.circle");
+      color = Color.red()
     }
     
     if (symbol === null) {
@@ -392,9 +387,23 @@ right.setPadding(0, 0, 0, 0)
   
   {
     stack.addSpacer(5);
-    let text = stack.addText(`${car.battery_details.rated_battery_range} km             `)
+    stack.centerAlignContent();
+    let km = `${car.battery_details.rated_battery_range}`.split('.')[0];
+    let text = stack.addText(`${km}             `)
     text.textColor = car.state === "charging" ? Color.green() : Color.white();
     text.font = Font.mediumSystemFont(12)
+    text.leftAlignText();
+  }
+  
+  {
+    let time = stack.addDate(new Date());
+    time.size = new Size(30, 20)
+    time.applyTimerStyle();
+    time.minimumScaleFactor = 0.5
+    time.font = Font.mediumSystemFont(12);
+    time.lineLimit = 1;
+    time.textColor = Color.gray();
+    time.rightAlignText();
   }
   
 }
@@ -414,17 +423,12 @@ right.setPadding(0, 0, 0, 0)
       timeText = timeText + `${min}m`;
     }
     
-    left.addSpacer(5)
-    let line1 = left.addText(` ${car.charging_details.charger_power}kW · ${car.charging_details.charger_actual_current}A · ${car.charging_details.charge_limit_soc}%          `)
+    left.addSpacer(8)
+    let line1 = left.addText(` ${car.charging_details.charger_power}kW → ${car.charging_details.charge_limit_soc}% · ${timeText}         `)
     line1.lineLimit = 1;
     line1.font = Font.mediumSystemFont(12)
     line1.textColor = Color.green();
 
-    left.addSpacer(5)
-    let line2 = left.addText(` ${car.charging_details.charge_energy_added}kWh · ${timeText}          `)
-    line2.lineLimit = 1;
-    line2.font = Font.mediumSystemFont(12)
-    line2.textColor = Color.green();
   }
 }
 
@@ -495,11 +499,13 @@ right.setPadding(0, 0, 0, 0)
 {
   
   left.addSpacer(15)
-  
-  let stack = left.addStack();
+ 
   
   // Data Time
   {
+    
+    let stack = left.addStack();
+    
     let text = stack.addText("")
   
     let desc = "long long ago"
@@ -521,7 +527,7 @@ right.setPadding(0, 0, 0, 0)
     text.lineLimit = 2;
     //text.url = `http://maps.apple.com/?ll=${car.car_geodata.latitude},${car.car_geodata.longitude}&q=` + encodeURI(car.display_name);
   }
- 
+  
   
 }
 
@@ -541,3 +547,6 @@ right.setPadding(0, 0, 0, 0)
 Script.setWidget(widget)
 widget.presentMedium()
 Script.complete();
+  
+
+
