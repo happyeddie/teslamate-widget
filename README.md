@@ -13,7 +13,9 @@
 - 当前位置地图（高德地图）
 - 当前朝向
 
-### Scriptable
-此脚本需搭配 [Scriptable](http://scriptable.app) 使用
+### 依赖
+- 此脚本需搭配 [Scriptable](http://scriptable.app) 使用
+- 需申请 [高德地图开发者账号](https://lbs.amap.com/api/webservice/guide/create-project/get-key)
+- 需独立部署 [TeslaMate](https://github.com/adriankumpf/teslamate) & [TeslaMateApi](https://github.com/tobiasehlert/teslamateapi)
 ### 我的引荐链接
 [http://ts.la/pcmg48082](http://ts.la/pcmg48082)
