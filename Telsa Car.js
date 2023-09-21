@@ -125,19 +125,22 @@ async function getCarGeo(lat, lng) {
   }
   
   if (json == null || car.car_geodata.latitude != car.prev_geodata.latitude) {
-    // const url = `https://restapi.amap.com/v3/geocode/regeo?output=json&extensions=all&location=${geo.longitude},${geo.latitude}&key=${AMAP_API_KEY}`;
-    // console.log(url)
-    // let req = await new Request(url);
-    // json = await req.loadString();
+    //const url = `https://restapi.amap.com/v3/geocode/regeo?output=json&extensions=all&location=${geo.longitude},${geo.latitude}&key=${AMAP_API_KEY}`;
+    //let req = await new Request(url);
+    //json = await req.loadString();
+    
     let location = await Location.reverseGeocode(geo.latitude, geo.longitude, "zh-CN");
     json = JSON.stringify(location);
+    
+    //console.log(json)
+    
     fm.writeString(file, json);
     json = JSON.parse(json);
     console.log("Geo Written To Disk");
   }
 	
   let image;
-  let zoom = car.state === "driving" ? 14 : 14;
+  let zoom = car.state === "driving" ? 15 : 16;
   filename = `car_map_${car.id}.png`;
   file = fm.joinPath(fileRoot, filename);    
 	
@@ -148,7 +151,7 @@ async function getCarGeo(lat, lng) {
 
   
   if (image == null || car.car_geodata.latitude != car.prev_geodata.latitude) {
-    let url = `https://restapi.amap.com/v3/staticmap?markers=small,0xFF0000,A:${geo.longitude},${geo.latitude}&zoom=${zoom}&size=150*150&key=${AMAP_API_KEY}`
+    let url = `https://restapi.amap.com/v3/staticmap?scale=2&location=${geo.longitude},${geo.latitude}&zoom=${zoom}&size=150*150&key=${AMAP_API_KEY}`
     let req = await new Request(url);
     image = await req.loadImage();
     fm.writeImage(file, image);
@@ -157,7 +160,7 @@ async function getCarGeo(lat, lng) {
 
   return await {
 //    "geofence" : JSON.parse(json).regeocode.addressComponent.neighborhood.name,
-    "geofence" : json[0].thoroughfare,
+    "geofence" : json?.regeocode?.pois[0]?.name || json[0]?.name || json[0]?.thoroughfare,
     "latitude" : geo.latitude,
     "longitude" : geo.longitude,
     "lat" : lat,
@@ -243,12 +246,22 @@ right.setPadding(0, 0, 0, 0)
     text.url=TESLA_MATE_URL
   }
   
+  stack.addSpacer(3)
+  
+  // update available
+  {
+    if (car.car_versions.update_available) {
+      let img = stack.addImage(SFSymbol.named("gift.circle").image);
+      img.tintColor = Color.green();
+      img.imageSize = new Size(18, 18);
+    }
+  }
+  
   // Car State
   {
-    stack.addSpacer(8)
-    
     //car.state = "suspended";
     
+    stack.addSpacer(5)
     let symbol = null
     let color = Color.white();
     
@@ -475,6 +488,7 @@ right.setPadding(0, 0, 0, 0)
     let img = stack.addImage(symbol.image);
     img.imageSize = iconSize;
     img.tintColor = car.car_status.windows_open === true ? Color.white() : Color.gray();
+    //img.url = "scriptable:///run?scriptName=" + encodeURIComponent(Script.name()) + '&ctrl=' + (car.car_status.windows_open === true ? 'window_close' : 'window_open');
     stack.addSpacer(spacerSize);
   }
   
@@ -494,6 +508,23 @@ right.setPadding(0, 0, 0, 0)
   }
 }
 
+
+function calculateSidesLength(length, angle) {
+      
+    // 角度转换为弧度
+    var angleA = 90;
+    var angleB = 90 - angle;
+    var angleC = angle;
+    angleA = angleA * Math.PI / 180;
+    angleB = angleB * Math.PI / 180;
+    angleC = angleC * Math.PI / 180;
+
+    // 使用正弦定理计算其他两边的长度
+    var y = length * Math.sin(angleB) / Math.sin(angleA);
+    var x = length * Math.sin(angleC) / Math.sin(angleA);
+    
+    return [16 + parseInt(x.toFixed(0)), 16 - parseInt(y.toFixed(0))];
+}
 
 // Location Info
 {
@@ -531,12 +562,54 @@ right.setPadding(0, 0, 0, 0)
   
 }
 
+
 // Map
 {
   let stack = right.addStack();
   stack.setPadding(0, 0, 0, 0)
   {
-    let image = stack.addImage(car.car_geodata.image)
+    
+    let map = new DrawContext();
+    map.opaque = false;
+    map.size = new Size(300, 300);
+    map.drawImageAtPoint(car.car_geodata.image, new Point(0, 0))
+    
+    let angle = car.driving_details.heading;
+    let arrow = new DrawContext();
+    arrow.size = new Size(40, 40);
+    arrow.opaque = false;
+    
+    {
+      let path = new Path();
+      path.addLines([
+        new Point(calculateSidesLength(18, angle)[0], calculateSidesLength(18, angle)[1]), 
+        new Point(calculateSidesLength(18, angle + 130)[0], calculateSidesLength(18, angle + 130)[1]), 
+        new Point(calculateSidesLength(8, angle + 180)[0], calculateSidesLength(8, angle + 180)[1]),      
+        new Point(calculateSidesLength(18, angle - 130)[0], calculateSidesLength(18, angle - 130)[1]), 
+      ]);
+      arrow.addPath(path)
+      arrow.setFillColor(Color.white());
+      arrow.fillPath();
+    }
+    
+    {
+      let path = new Path();
+      path.addLines([
+        new Point(calculateSidesLength(14, angle)[0], calculateSidesLength(14, angle)[1]), 
+        new Point(calculateSidesLength(14, angle + 130)[0], calculateSidesLength(14, angle + 130)[1]), 
+        new Point(calculateSidesLength(4, angle + 180)[0], calculateSidesLength(4, angle + 180)[1]),      
+        new Point(calculateSidesLength(14, angle - 130)[0], calculateSidesLength(14, angle - 130)[1]), 
+      ]);
+      arrow.addPath(path)
+      arrow.setFillColor(Color.blue());
+      arrow.fillPath();
+    }
+    
+    map.drawImageAtPoint(arrow.getImage(), new Point(130, 130))
+    
+    
+    
+    let image = stack.addImage(map.getImage());
     image.rightAlignImage();
     image.cornerRadius = 0;
     image.url = `http://maps.apple.com/?ll=${car.car_geodata.latitude},${car.car_geodata.longitude}&q=` + encodeURI(car.display_name);
