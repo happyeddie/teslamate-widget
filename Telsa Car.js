@@ -11,7 +11,7 @@ const padding = 0;
   // https://lbs.amap.com/api/webservice/guide/create-project/get-key
   var AMAP_API_KEY = "";
   
-  var TESLA_MATE_CAR_ID = 1;
+  var TESLA_MATE_CAR_ID = params[0] || 1;
 
   // https://github.com/tobiasehlert/teslamateapi
   var TESLA_MATE_API_URL = `http(s)://[TeslaMate Api URL]/api/v1/cars/${TESLA_MATE_CAR_ID}/status`;
@@ -23,7 +23,18 @@ const padding = 0;
 
 }
 
+
+const widget = new ListWidget();
+widget.setPadding(0, 0, 0, 0);
+
 if (config.runsInApp) {
+  
+  //a = new Alert()
+  //a.title = "非桌面环境执行了组件代码"
+  //a.message = "传递过来的参数是："+args['queryParameters']['ctrl']
+  //a.presentAlert()  
+  //return;
+  
   let wv = new WebView();
   await wv.loadURL(TESLA_MATE_URL);
   
@@ -38,16 +49,69 @@ if (config.runsInApp) {
   return;
 }
 
+if (config.runsInAccessoryWidget) {
+  
+  var data = await getCarData();
+  car = data.data.status;
+  
+  {  
+    let circle = new DrawContext();
+    circle.size = new Size(100, 100);
+    circle.opaque = false;
+      
+    circle.setStrokeColor(Color.black());
+    circle.setLineWidth(10);
+    circle.strokeEllipse(new Rect(5, 5, 90, 90));
+      
+    let power = car.battery_details.battery_level;
+    circle.setFillColor(Color.white())
+      
+    let width = 8;
+    for (let angle = 0; angle <= 360 / 100 * power; angle += 1) {
+      let loc = calculateSidesLength(45, angle, 50)
+      let rect = new Rect(loc[0] - width/2, loc[1] - width/2, width, width);
+      circle.fillEllipse(rect);
+    }
+      
+      
+    circle.setTextColor(Color.white())
+    circle.setFontSize(10)
+    let km = `${car.battery_details.rated_battery_range}`.split('.')[0];
+    if (km.length == 1) {
+      km = '  ' + km;
+    }
+    else if (km.length == 1) {
+      km = ' ' + km;
+    }
+    //circle.drawText(km, new Point(39, 17))
+      
+
+    let iconData = Data.fromBase64String("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");
+    if (car.state === "charging") {
+      iconData = Data.fromBase64String("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");
+    }
+    
+    circle.drawImageAtPoint(Image.fromData(iconData), new Point(30, 34))
+
+    let image = widget.addImage(circle.getImage(iconData));
+    image.borderWidth=0;
+  }
+    
+  
+    
+  Script.setWidget(widget)
+  widget.presentSmall()
+  Script.complete();
+  return;
+}
+
 let fm = FileManager.iCloud();
 let fileRoot = fm.joinPath(fm.documentsDirectory(), "/tesla");
 if(!fm.isDirectory(fileRoot)) {
   fm.createDirectory(fileRoot)
 }
 
-const widget = new ListWidget();
-widget.setPadding(0, 0, 0, 0);
 widget.backgroundColor = Color.black();
-widget.refreshAfterDate = new Date(Date.now() + 1000 * 60 * 1);
 
 function isLocationOutOfChina(latitude, longitude) {
   if (longitude < 72.004 || longitude > 137.8347 || latitude < 0.8293 || latitude > 55.8271)
@@ -101,7 +165,6 @@ function transformLonWithXY(x, y) {
   return lon;
 }
 
-
 async function getCarData() {
   const url = `${TESLA_MATE_API_URL}`;
   let req = await new Request(url);
@@ -140,7 +203,7 @@ async function getCarGeo(lat, lng) {
   }
 	
   let image;
-  let zoom = car.state === "driving" ? 15 : 16;
+  let zoom = car.state === "driving" ? 14 : 14;
   filename = `car_map_${car.id}.png`;
   file = fm.joinPath(fileRoot, filename);    
 	
@@ -167,6 +230,23 @@ async function getCarGeo(lat, lng) {
     "lng" : lng,
     "image" : image
   }
+}
+
+function calculateSidesLength(length, angle, size) {
+      
+    // 角度转换为弧度
+    var angleA = 90;
+    var angleB = 90 - angle;
+    var angleC = angle;
+    angleA = angleA * Math.PI / 180;
+    angleB = angleB * Math.PI / 180;
+    angleC = angleC * Math.PI / 180;
+
+    // 使用正弦定理计算其他两边的长度
+    var y = length * Math.sin(angleB) / Math.sin(angleA);
+    var x = length * Math.sin(angleC) / Math.sin(angleA);
+    
+    return [size + parseInt(x.toFixed(0)), size - parseInt(y.toFixed(0))];
 }
 
 // Data Init
@@ -196,10 +276,13 @@ async function getCarGeo(lat, lng) {
   fm.writeString(file, JSON.stringify(data));
   
   if (car.state === "driving") {
-    widget.refreshAfterDate = new Date(Date.now() + 1000 * 60);
+    widget.refreshAfterDate = new Date(Date.now() + 1000 * 10);
   }
   else if (car.state === "charging") {
-    widget.refreshAfterDate = new Date(Date.now() + 1000 * 20);
+    widget.refreshAfterDate = new Date(Date.now() + 1000 * 30);
+  }
+  else {
+    widget.refreshAfterDate = new Date(Date.now() + 1000 * 60);
   }
   
   let geo = await getCarGeo(car.car_geodata.latitude, car.car_geodata.longitude)
@@ -508,24 +591,6 @@ right.setPadding(0, 0, 0, 0)
   }
 }
 
-
-function calculateSidesLength(length, angle) {
-      
-    // 角度转换为弧度
-    var angleA = 90;
-    var angleB = 90 - angle;
-    var angleC = angle;
-    angleA = angleA * Math.PI / 180;
-    angleB = angleB * Math.PI / 180;
-    angleC = angleC * Math.PI / 180;
-
-    // 使用正弦定理计算其他两边的长度
-    var y = length * Math.sin(angleB) / Math.sin(angleA);
-    var x = length * Math.sin(angleC) / Math.sin(angleA);
-    
-    return [16 + parseInt(x.toFixed(0)), 16 - parseInt(y.toFixed(0))];
-}
-
 // Location Info
 {
   
@@ -578,27 +643,28 @@ function calculateSidesLength(length, angle) {
     let arrow = new DrawContext();
     arrow.size = new Size(40, 40);
     arrow.opaque = false;
+    let size = 16;
     
     {
       let path = new Path();
       path.addLines([
-        new Point(calculateSidesLength(18, angle)[0], calculateSidesLength(18, angle)[1]), 
-        new Point(calculateSidesLength(18, angle + 130)[0], calculateSidesLength(18, angle + 130)[1]), 
-        new Point(calculateSidesLength(8, angle + 180)[0], calculateSidesLength(8, angle + 180)[1]),      
-        new Point(calculateSidesLength(18, angle - 130)[0], calculateSidesLength(18, angle - 130)[1]), 
+        new Point(calculateSidesLength(20, angle, size)[0], calculateSidesLength(20, angle, size)[1]), 
+        new Point(calculateSidesLength(20, angle + 130, size)[0], calculateSidesLength(20, angle + 130, size)[1]), 
+        new Point(calculateSidesLength(8, angle + 180, size)[0], calculateSidesLength(8, angle + 180, size)[1]),      
+        new Point(calculateSidesLength(20, angle - 130, size)[0], calculateSidesLength(20, angle - 130, size)[1]), 
       ]);
       arrow.addPath(path)
       arrow.setFillColor(Color.white());
       arrow.fillPath();
     }
-    
+
     {
       let path = new Path();
       path.addLines([
-        new Point(calculateSidesLength(14, angle)[0], calculateSidesLength(14, angle)[1]), 
-        new Point(calculateSidesLength(14, angle + 130)[0], calculateSidesLength(14, angle + 130)[1]), 
-        new Point(calculateSidesLength(4, angle + 180)[0], calculateSidesLength(4, angle + 180)[1]),      
-        new Point(calculateSidesLength(14, angle - 130)[0], calculateSidesLength(14, angle - 130)[1]), 
+        new Point(calculateSidesLength(14, angle, size)[0], calculateSidesLength(14, angle, size)[1]), 
+        new Point(calculateSidesLength(14, angle + 130, size)[0], calculateSidesLength(14, angle + 130, size)[1]), 
+        new Point(calculateSidesLength(4, angle + 180, size)[0], calculateSidesLength(4, angle + 180, size)[1]),      
+        new Point(calculateSidesLength(14, angle - 130, size)[0], calculateSidesLength(14, angle - 130, size)[1]), 
       ]);
       arrow.addPath(path)
       arrow.setFillColor(Color.blue());
@@ -606,8 +672,6 @@ function calculateSidesLength(length, angle) {
     }
     
     map.drawImageAtPoint(arrow.getImage(), new Point(130, 130))
-    
-    
     
     let image = stack.addImage(map.getImage());
     image.rightAlignImage();
@@ -620,6 +684,3 @@ function calculateSidesLength(length, angle) {
 Script.setWidget(widget)
 widget.presentMedium()
 Script.complete();
-  
-
-
