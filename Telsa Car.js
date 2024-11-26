@@ -23,17 +23,16 @@ const padding = 0;
 
 }
 
+let fm = FileManager.local();
+let fileRoot = fm.joinPath(fm.documentsDirectory(), "/tesla");
+if(!fm.isDirectory(fileRoot)) {
+  fm.createDirectory(fileRoot)
+}
 
 const widget = new ListWidget();
 widget.setPadding(0, 0, 0, 0);
 
 if (config.runsInApp) {
-  
-  //a = new Alert()
-  //a.title = "非桌面环境执行了组件代码"
-  //a.message = "传递过来的参数是："+args['queryParameters']['ctrl']
-  //a.presentAlert()  
-  //return;
   
   let wv = new WebView();
   await wv.loadURL(TESLA_MATE_URL);
@@ -45,13 +44,24 @@ if (config.runsInApp) {
   }
   
   wv.present(); 
-  
   return;
 }
 
 if (config.runsInAccessoryWidget) {
   
-  var data = await getCarData();
+  let filename = `car_data_${TESLA_MATE_CAR_ID}.json`;
+  let file = fm.joinPath(fileRoot, filename);
+
+  var data
+  try {
+    data = await getCarData();
+  }
+  catch (e) {
+    console.log(e)
+    let json = await fm.readString(file);
+    data = JSON.parse(json);
+  }
+  
   car = data.data.status;
   
   {  
@@ -75,15 +85,17 @@ if (config.runsInAccessoryWidget) {
       
       
     circle.setTextColor(Color.white())
-    circle.setFontSize(10)
+    circle.setFont(Font.regularMonospacedSystemFont(12))
+    let offset = 0;
     let km = `${car.battery_details.rated_battery_range}`.split('.')[0];
+    km = '88'
     if (km.length == 1) {
-      km = '  ' + km;
+      offset = 8;
     }
-    else if (km.length == 1) {
-      km = ' ' + km;
+    else if (km.length == 2) {
+      offset = 4
     }
-    //circle.drawText(km, new Point(39, 17))
+    //circle.drawText(km, new Point(39 + offset, 70))
       
 
     let iconData = Data.fromBase64String("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");
@@ -105,13 +117,8 @@ if (config.runsInAccessoryWidget) {
   return;
 }
 
-let fm = FileManager.iCloud();
-let fileRoot = fm.joinPath(fm.documentsDirectory(), "/tesla");
-if(!fm.isDirectory(fileRoot)) {
-  fm.createDirectory(fileRoot)
-}
-
-widget.backgroundColor = Color.black();
+//widget.backgroundColor = Color.black();
+widget.backgroundColor = new Color("#292929", 100);
 
 function isLocationOutOfChina(latitude, longitude) {
   if (longitude < 72.004 || longitude > 137.8347 || latitude < 0.8293 || latitude > 55.8271)
@@ -173,12 +180,11 @@ async function getCarData() {
 
 async function getCarGeo(lat, lng) {
   let geo = wgs2gcj(lat, lng)
-  
   let filename = "";
   let file = null;
   
   let json;
-  filename = `car_map_${car.id}.json`;
+  filename = `car_map_${TESLA_MATE_CAR_ID}.json`;
   file = fm.joinPath(fileRoot, filename);
   
   if (fm.fileExists(file)) {
@@ -192,33 +198,36 @@ async function getCarGeo(lat, lng) {
     //let req = await new Request(url);
     //json = await req.loadString();
     
-    let location = await Location.reverseGeocode(geo.latitude, geo.longitude, "zh-CN");
-    json = JSON.stringify(location);
-    
-    //console.log(json)
-    
-    fm.writeString(file, json);
-    json = JSON.parse(json);
-    console.log("Geo Written To Disk");
+    try {
+      let location = await Location.reverseGeocode(geo.latitude, geo.longitude, "zh-CN");
+      json = JSON.stringify(location);
+      
+      //console.log(json)
+      
+      fm.writeString(file, json);
+      json = JSON.parse(json);
+      console.log("Write Geo To Disk");
+    } catch (e) {}
   }
 	
   let image;
   let zoom = car.state === "driving" ? 14 : 14;
-  filename = `car_map_${car.id}.png`;
+  filename = `car_map_${TESLA_MATE_CAR_ID}.png`;
   file = fm.joinPath(fileRoot, filename);    
 	
   if (fm.fileExists(file)){
     image = await fm.readImage(file);
     console.log("Read Map From Disk");
   }
-
   
+
   if (image == null || car.car_geodata.latitude != car.prev_geodata.latitude) {
     let url = `https://restapi.amap.com/v3/staticmap?scale=2&location=${geo.longitude},${geo.latitude}&zoom=${zoom}&size=150*150&key=${AMAP_API_KEY}`
     let req = await new Request(url);
     image = await req.loadImage();
+    
     fm.writeImage(file, image);
-    console.log("Map Written To Disk");
+    console.log("Write Map To Disk");
   }
 
   return await {
@@ -252,13 +261,21 @@ function calculateSidesLength(length, angle, size) {
 // Data Init
 {
   
-  var data = await getCarData();
-  car = data.data.status;
-  car.id = data.data.car.car_id;
-  
   // load pre data
-  let filename = `car_data_${car.id}.json`;
+  let filename = `car_data_${TESLA_MATE_CAR_ID}.json`;
   let file = fm.joinPath(fileRoot, filename);
+
+  var data
+  try {
+    data = await getCarData();
+  }
+  catch (e) {
+    console.log(e)
+    let json = await fm.readString(file);
+    data = JSON.parse(json);
+  }
+  
+  car = data.data.status;
   
   if (fm.fileExists(file)) {
     let prevData = await fm.readString(file);
@@ -267,13 +284,11 @@ function calculateSidesLength(length, angle, size) {
       car.prev_geodata = prevData.data.status.car_geodata;
     }
   }
-  
+
   //car.state = "charging";
   //car.state = "driving"
   //car.prev_geodata.latitude = 1
   //car.driving_details.speed = 100;
-  
-  fm.writeString(file, JSON.stringify(data));
   
   if (car.state === "driving") {
     widget.refreshAfterDate = new Date(Date.now() + 1000 * 10);
@@ -286,7 +301,10 @@ function calculateSidesLength(length, angle, size) {
   }
   
   let geo = await getCarGeo(car.car_geodata.latitude, car.car_geodata.longitude)
-  car.car_geodata = geo;
+  car.car_geo = geo;
+
+  console.log("Write Data to Disk")
+  fm.writeString(file, JSON.stringify(data));
 }
 
 
@@ -343,6 +361,21 @@ right.setPadding(0, 0, 0, 0)
   // Car State
   {
     //car.state = "suspended";
+    
+    // Tire
+    {  
+      if (car.tpms_details && (
+        car.tpms_details.tpms_pressure_rl < 2.45 || 
+        car.tpms_details.tpms_pressure_fl < 2.45 || 
+        car.tpms_details.tpms_pressure_rr < 2.45 || 
+        car.tpms_details.tpms_pressure_fr < 2.45
+      )) {
+        let symbol = SFSymbol.named("exclamationmark.tirepressure");
+        let img = stack.addImage(symbol.image);
+        img.tintColor = Color.yellow();
+        img.imageSize = new Size(16, 16);
+      }
+    }
     
     stack.addSpacer(5)
     let symbol = null
@@ -403,6 +436,7 @@ right.setPadding(0, 0, 0, 0)
       img.tintColor = color;
       img.imageSize = new Size(18, 18);
     }
+    
   }
   
   stack.addSpacer(4)
@@ -411,6 +445,7 @@ right.setPadding(0, 0, 0, 0)
     text.font = Font.mediumSystemFont(12)
     text.textColor = Color.green();
   }
+ 
 
 }
 
@@ -440,6 +475,22 @@ right.setPadding(0, 0, 0, 0)
     
     {
       
+      let width = (100 - car.charging_details.charge_limit_soc) / 100 * 40;
+      
+      let draw = new DrawContext();
+      draw.opaque = false;
+      draw.size = new Size(42, height - 2);
+      let path = new Path();
+      path.addRoundedRect(new Rect(0, 0, width, height - 2), 1, 1);
+      draw.addPath(path)
+      draw.setFillColor(Color.black());
+      draw.fillPath();
+      
+      battery.drawImageAtPoint(draw.getImage(), new Point(41 - width, 1));
+    }
+    
+    {
+      
       let width = (car.charging_details.charge_limit_soc - car.battery_details.battery_level) / 100 * 40;
       let x = car.battery_details.battery_level / 100 * 40 + 1;
       
@@ -455,26 +506,10 @@ right.setPadding(0, 0, 0, 0)
       battery.drawImageAtPoint(draw.getImage(), new Point(x, 1));
       battery.setFont(Font.mediumSystemFont(11))
       battery.setTextAlignedCenter();
-      battery.setTextColor(Color.black());
+      battery.setTextColor(car.state === "charging" ? Color.white() : Color.black());
       
       battery.drawText(`${car.battery_details.battery_level}`, new Point(14, 0))
       
-    }
-    
-    {
-      
-      let width = (100 - car.charging_details.charge_limit_soc) / 100 * 40;
-      
-      let draw = new DrawContext();
-      draw.opaque = false;
-      draw.size = new Size(42, height - 2);
-      let path = new Path();
-      path.addRoundedRect(new Rect(0, 0, width, height - 2), 1, 1);
-      draw.addPath(path)
-      draw.setFillColor(Color.black());
-      draw.fillPath();
-      
-      battery.drawImageAtPoint(draw.getImage(), new Point(41 - width, 1));
     }
     
     let image = stack.addImage(battery.getImage())
@@ -617,11 +652,11 @@ right.setPadding(0, 0, 0, 0)
       desc = Math.floor(sec / 3600) + 'h';
     }
 
-    text.text = desc + ' · ' + car.car_geodata.geofence
+    text.text = desc + ' · ' + car.car_geo.geofence
     text.font = Font.mediumSystemFont(12)
     text.textColor = Color.gray();
     text.lineLimit = 2;
-    //text.url = `http://maps.apple.com/?ll=${car.car_geodata.latitude},${car.car_geodata.longitude}&q=` + encodeURI(car.display_name);
+    //text.url = `http://maps.apple.com/?ll=${car.car_geo.latitude},${car.car_geo.longitude}&q=` + encodeURI(car.display_name);
   }
   
   
@@ -637,7 +672,7 @@ right.setPadding(0, 0, 0, 0)
     let map = new DrawContext();
     map.opaque = false;
     map.size = new Size(300, 300);
-    map.drawImageAtPoint(car.car_geodata.image, new Point(0, 0))
+    map.drawImageAtPoint(car.car_geo.image, new Point(0, 0))
     
     let angle = car.driving_details.heading;
     let arrow = new DrawContext();
@@ -676,7 +711,7 @@ right.setPadding(0, 0, 0, 0)
     let image = stack.addImage(map.getImage());
     image.rightAlignImage();
     image.cornerRadius = 0;
-    image.url = `http://maps.apple.com/?ll=${car.car_geodata.latitude},${car.car_geodata.longitude}&q=` + encodeURI(car.display_name);
+    image.url = `http://maps.apple.com/?ll=${car.car_geo.latitude},${car.car_geo.longitude}&q=` + encodeURI(car.display_name);
   }
     
 }
