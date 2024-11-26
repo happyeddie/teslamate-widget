@@ -2,6 +2,8 @@
 
 ![charging](./docs/charging.jpg)
 
+![lock screen](./docs/lock_screen.png)
+
 ### 功能
 - 车辆名称
 - 车辆状态（在线 / 哨兵 / 休眠 / 进入休眠 / 驾驶中 / 充电中 / 更新中 / 离线）
@@ -12,6 +14,7 @@
 - 当前位置地名
 - 当前位置地图（高德地图）
 - 当前朝向
+- 锁屏 Widget 显示电量
 
 ### 依赖
 - 此脚本需搭配 [Scriptable](http://scriptable.app) 使用
