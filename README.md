@@ -1,6 +1,8 @@
 # TeslaMate Scriptable Widget
 
-基于 [Scriptable](https://scriptable.app/) 的 TeslaMate 小组件脚本，用于在 iOS 桌面和锁屏显示车辆状态、续航、充电、位置和地图信息。
+Language: **English** | [Chinese](./README.zh-CN.md)
+
+A [Scriptable](https://scriptable.app/) widget script for TeslaMate. It shows vehicle status, range, charging state, location, and map information on the iOS Home Screen and Lock Screen.
 
 ![asleep](./docs/asleep.jpg)
 
@@ -8,85 +10,94 @@
 
 ![lock screen](./docs/lock_screen.png)
 
-## 功能
+## Table of Contents
 
-- 车辆名称
-- 车辆状态（在线 / 哨兵 / 休眠 / 进入休眠 / 驾驶中 / 充电中 / 更新中 / 离线）
-- 电池状态（剩余电量比例 / 剩余里程数 / 充电上限阈值）
-- 充电状态（功率 / 充电上限 / 剩余时间）
-- 控制状态（车锁 / 主驾有人 / 车窗 / 空调 / 车门）
-- Widget 最后更新时间
-- 当前位置地名
-- 当前位置地图（高德地图）
-- 当前朝向
-- 锁屏 Widget 显示电量
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation and Configuration](#installation-and-configuration)
+- [Local Automated Tests](#local-automated-tests)
+- [AI Development Docs](#ai-development-docs)
+- [Referral Link](#referral-link)
 
-## 依赖
+## Features
 
-- 此脚本需搭配 [Scriptable](http://scriptable.app) 使用
-- 需申请 [高德地图开发者账号](https://lbs.amap.com/api/webservice/guide/create-project/get-key)
-- 需独立部署 [TeslaMate](https://github.com/adriankumpf/teslamate) & [TeslaMateApi](https://github.com/tobiasehlert/teslamateapi)
+- Vehicle name
+- Vehicle state: online, sentry, asleep, suspended, driving, charging, updating, or offline
+- Battery state: battery percentage, rated range, and charge limit
+- Charging state: charger power, charge limit, and time remaining
+- Control state: lock, driver presence, windows, climate, and doors
+- Widget last update time
+- Current location name
+- Current location map from AMap
+- Current heading
+- Lock Screen widget battery display
 
-## 安装与配置
+## Requirements
 
-1. 将 `Telsa Car.js` 复制到 Scriptable。
-2. 在脚本顶部配置：
+- [Scriptable](http://scriptable.app)
+- An [AMap developer key](https://lbs.amap.com/api/webservice/guide/create-project/get-key)
+- A self-hosted [TeslaMate](https://github.com/adriankumpf/teslamate) and [TeslaMateApi](https://github.com/tobiasehlert/teslamateapi) setup
+
+## Installation and Configuration
+
+1. Copy `Telsa Car.js` into Scriptable.
+2. Configure these values near the top of the script:
    - `AMAP_API_KEY`
    - `TESLA_MATE_API_URL`
    - `TESLA_MATE_URL`
-3. 在 Scriptable Widget 的参数中传入车辆 ID，例如 `1`。
-4. 如需保留主题标记，可传入 `dark,1` 或 `1,dark`。
+3. Set the Scriptable widget parameter to the vehicle ID, for example `1`.
+4. If you also want to keep the theme marker, use `dark,1` or `1,dark`.
 
-缓存文件会写入 Scriptable documents 目录下的 `tesla/` 文件夹。
+Cache files are stored in the `tesla/` folder under Scriptable documents.
 
-## 本地自动化测试
+## Local Automated Tests
 
-本项目提供 Node 版 Scriptable runtime stub，用于在本地执行原始脚本并验证主要运行效果。
+This repository includes a Node-based Scriptable runtime stub. It runs the original script locally and verifies the main behavior.
 
 ```bash
 npm test
 ```
 
-测试覆盖桌面 widget、锁屏 widget、充电状态、行驶状态、WebView 分支和 API 失败缓存回退。详见 [docs/testing.md](./docs/testing.md)。
+The tests cover the medium Home Screen widget, Lock Screen widget, charging state, driving state, WebView branch, and API failure cache fallback. See [docs/testing.md](./docs/testing.md) for details.
 
-在 macOS 桌面已添加 Scriptable `Run Script` widget，且用户允许真实截图时，生成真实 WidgetKit 运行截图：
+If a Scriptable `Run Script` widget has been added on the macOS desktop and real screenshots are allowed, capture the real WidgetKit rendering with:
 
 ```bash
 npm run capture:widget
 ```
 
-生成彩色真实截图：
+Capture a real full-color widget screenshot with:
 
 ```bash
 npm run capture:widget:color
 ```
 
-在 iPhone 已通过 USB 连接、已信任本机，并停留在负一屏时，抓取真机当前屏幕：
+If an iPhone is connected over USB, trusted by the Mac, and showing the Today View, capture the real device screen with:
 
 ```bash
 npm run capture:iphone
 ```
 
-如果已经打开 iPhone Mirroring，可直接抓取镜像窗口：
+If iPhone Mirroring is already open, capture the mirroring window with:
 
 ```bash
 npm run capture:iphone:mirror
 ```
 
-只裁剪镜像里的 TeslaMate widget：
+Crop only the TeslaMate widget from the iPhone Mirroring screenshot with:
 
 ```bash
 npm run capture:iphone:mirror:widget
 ```
 
-## AI 开发文档
+## AI Development Docs
 
-- [AGENTS.md](./AGENTS.md)：AI 协作约定。
-- [docs/scriptable-capabilities.md](./docs/scriptable-capabilities.md)：Scriptable 能力清单和开发依据。
-- [docs/architecture.md](./docs/architecture.md)：项目结构、数据流和缓存策略。
-- [docs/code-review.md](./docs/code-review.md)：当前代码审查记录。
-- [docs/testing.md](./docs/testing.md)：自动化测试机制。
+- [AGENTS.md](./AGENTS.md): AI collaboration rules.
+- [docs/scriptable-capabilities.md](./docs/scriptable-capabilities.md): Scriptable API capabilities and development constraints.
+- [docs/architecture.md](./docs/architecture.md): Project structure, data flow, and cache strategy.
+- [docs/code-review.md](./docs/code-review.md): Current code review notes.
+- [docs/testing.md](./docs/testing.md): Automated testing workflow.
 
-## 我的引荐链接
+## Referral Link
 
 [http://ts.la/pcmg48082](http://ts.la/pcmg48082)

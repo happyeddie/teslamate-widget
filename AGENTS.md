@@ -3,14 +3,14 @@
 ## 工作语言
 
 - 与用户沟通、文档、审查结论和提交信息默认使用中文。
-- README 面向用户的内容默认使用简体中文。
+- 默认 README 使用纯英文；中文用户文档维护在 `README.zh-CN.md`。
 - 代码注释只在能降低理解成本时添加，避免解释显而易见的语句。
 
 ## 项目定位
 
 - 这是一个基于 [Scriptable](https://scriptable.app/) 的 TeslaMate 小组件脚本项目。
 - 运行入口是仓库根目录的 `Telsa Car.js`，文件名当前保持历史拼写，不要在未同步安装说明和用户设备脚本名的情况下重命名。
-- `README.md` 是中文用户文档，`docs/` 存放 README 使用的截图和项目说明。
+- `README.md` 是默认英文用户文档，`README.zh-CN.md` 是简体中文用户文档，`docs/` 存放 README 使用的截图和项目说明。
 - 脚本依赖 iOS Scriptable 桥接 API，不能直接当作普通浏览器或 Node 脚本运行。
 
 ## 关键运行环境

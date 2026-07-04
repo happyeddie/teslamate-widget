@@ -6,6 +6,7 @@
 .
 ├── AGENTS.md
 ├── README.md
+├── README.zh-CN.md
 ├── Telsa Car.js
 ├── docs/
 │   ├── architecture.md
