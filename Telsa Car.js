@@ -1,17 +1,19 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: red; icon-glyph: car-side;
-const params = args.widgetParameter ? args.widgetParameter.split(",") : [];
+const params = args.widgetParameter ? args.widgetParameter.split(",").map((item) => item.trim()).filter(Boolean) : [];
 
-const isDarkTheme = params?.[0] === 'dark';
+const isDarkTheme = params.includes('dark');
 const padding = 0;
+const MEDIUM_WIDGET_HEIGHT = 176;
+const MAP_PANEL_SIZE = 176;
 
 {
  
   // https://lbs.amap.com/api/webservice/guide/create-project/get-key
   var AMAP_API_KEY = "";
   
-  var TESLA_MATE_CAR_ID = params[0] || 1;
+  var TESLA_MATE_CAR_ID = params.find((item) => /^\d+$/.test(item)) || 1;
 
   // https://github.com/tobiasehlert/teslamateapi
   var TESLA_MATE_API_URL = `http(s)://[TeslaMate Api URL]/api/v1/cars/${TESLA_MATE_CAR_ID}/status`;
@@ -24,7 +26,7 @@ const padding = 0;
 }
 
 let fm = FileManager.local();
-let fileRoot = fm.joinPath(fm.documentsDirectory(), "/tesla");
+let fileRoot = fm.joinPath(fm.documentsDirectory(), "tesla");
 if(!fm.isDirectory(fileRoot)) {
   fm.createDirectory(fileRoot)
 }
@@ -39,7 +41,13 @@ if (config.runsInApp) {
   
   for (var i = 1; i < 5; i++) {
     if ( i != TESLA_MATE_CAR_ID) {
-      wv.evaluateJavaScript(`document.styleSheets[0].insertRule('#car_${i}, div.navbar-brand, footer {display: none}').insertRule('')`)
+      await wv.evaluateJavaScript(`
+        (() => {
+          const style = document.createElement('style');
+          style.textContent = '#car_${i}, div.navbar-brand, footer {display: none}';
+          document.head.appendChild(style);
+        })()
+      `)
     }
   }
   
@@ -58,6 +66,9 @@ if (config.runsInAccessoryWidget) {
   }
   catch (e) {
     console.log(e)
+    if (!fm.fileExists(file)) {
+      throw e;
+    }
     let json = await fm.readString(file);
     data = JSON.parse(json);
   }
@@ -178,6 +189,12 @@ async function getCarData() {
   return await req.loadJSON();
 }
 
+function hasCarMoved() {
+  return !car.prev_geodata ||
+    car.car_geodata.latitude !== car.prev_geodata.latitude ||
+    car.car_geodata.longitude !== car.prev_geodata.longitude;
+}
+
 async function getCarGeo(lat, lng) {
   let geo = wgs2gcj(lat, lng)
   let filename = "";
@@ -193,7 +210,7 @@ async function getCarGeo(lat, lng) {
     console.log("Read Geo From Disk");
   }
   
-  if (json == null || car.car_geodata.latitude != car.prev_geodata.latitude) {
+  if (json == null || hasCarMoved()) {
     //const url = `https://restapi.amap.com/v3/geocode/regeo?output=json&extensions=all&location=${geo.longitude},${geo.latitude}&key=${AMAP_API_KEY}`;
     //let req = await new Request(url);
     //json = await req.loadString();
@@ -207,7 +224,12 @@ async function getCarGeo(lat, lng) {
       fm.writeString(file, json);
       json = JSON.parse(json);
       console.log("Write Geo To Disk");
-    } catch (e) {}
+    } catch (e) {
+      console.log(e)
+      if (json == null) {
+        json = [{ name: "未知位置" }];
+      }
+    }
   }
 	
   let image;
@@ -221,18 +243,36 @@ async function getCarGeo(lat, lng) {
   }
   
 
-  if (image == null || car.car_geodata.latitude != car.prev_geodata.latitude) {
+  if (image == null || hasCarMoved()) {
     let url = `https://restapi.amap.com/v3/staticmap?scale=2&location=${geo.longitude},${geo.latitude}&zoom=${zoom}&size=150*150&key=${AMAP_API_KEY}`
     let req = await new Request(url);
-    image = await req.loadImage();
-    
-    fm.writeImage(file, image);
-    console.log("Write Map To Disk");
+    try {
+      image = await req.loadImage();
+      fm.writeImage(file, image);
+      console.log("Write Map To Disk");
+    } catch (e) {
+      console.log(e)
+    }
+  }
+
+  if (image == null) {
+    let placeholder = new DrawContext();
+    placeholder.size = new Size(300, 300);
+    placeholder.opaque = false;
+    image = placeholder.getImage();
+  }
+
+  let geofence = "未知位置";
+  if (Array.isArray(json)) {
+    geofence = json[0]?.name || json[0]?.thoroughfare || geofence;
+  }
+  else {
+    geofence = json?.regeocode?.pois[0]?.name || geofence;
   }
 
   return await {
 //    "geofence" : JSON.parse(json).regeocode.addressComponent.neighborhood.name,
-    "geofence" : json?.regeocode?.pois[0]?.name || json[0]?.name || json[0]?.thoroughfare,
+    "geofence" : geofence,
     "latitude" : geo.latitude,
     "longitude" : geo.longitude,
     "lat" : lat,
@@ -271,6 +311,9 @@ function calculateSidesLength(length, angle, size) {
   }
   catch (e) {
     console.log(e)
+    if (!fm.fileExists(file)) {
+      throw e;
+    }
     let json = await fm.readString(file);
     data = JSON.parse(json);
   }
@@ -278,11 +321,18 @@ function calculateSidesLength(length, angle, size) {
   car = data.data.status;
   
   if (fm.fileExists(file)) {
-    let prevData = await fm.readString(file);
-    prevData = JSON.parse(prevData);
-    if (prevData) {
-      car.prev_geodata = prevData.data.status.car_geodata;
+    try {
+      let prevData = await fm.readString(file);
+      prevData = JSON.parse(prevData);
+      if (prevData) {
+        car.prev_geodata = prevData.data.status.car_geodata;
+      }
+    } catch (e) {
+      console.log(e)
     }
+  }
+  if (!car.prev_geodata) {
+    car.prev_geodata = car.car_geodata;
   }
 
   //car.state = "charging";
@@ -320,14 +370,14 @@ main.layoutHorizontally();
 
 let left = main.addStack();
 left.layoutVertically();
-left.size = new Size(190, 170)
+left.size = new Size(190, MEDIUM_WIDGET_HEIGHT)
 left.setPadding(15, 25, 15, 25)
 
 main.addSpacer(10)
 
 let right = main.addStack();
 right.layoutVertically();
-right.size = new Size(170, 170)
+right.size = new Size(MAP_PANEL_SIZE, MEDIUM_WIDGET_HEIGHT)
 right.setPadding(0, 0, 0, 0)
 
 
@@ -667,6 +717,7 @@ right.setPadding(0, 0, 0, 0)
 {
   let stack = right.addStack();
   stack.setPadding(0, 0, 0, 0)
+  stack.size = new Size(MAP_PANEL_SIZE, MEDIUM_WIDGET_HEIGHT)
   {
     
     let map = new DrawContext();
@@ -710,6 +761,8 @@ right.setPadding(0, 0, 0, 0)
     
     let image = stack.addImage(map.getImage());
     image.rightAlignImage();
+    image.imageSize = new Size(MAP_PANEL_SIZE, MEDIUM_WIDGET_HEIGHT);
+    image.applyFillingContentMode();
     image.cornerRadius = 0;
     image.url = `http://maps.apple.com/?ll=${car.car_geo.latitude},${car.car_geo.longitude}&q=` + encodeURI(car.display_name);
   }
