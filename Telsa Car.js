@@ -1,10 +1,8 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: red; icon-glyph: car-side;
-const params = args.widgetParameter ? args.widgetParameter.split(",").map((item) => item.trim()).filter(Boolean) : [];
+const params = parseWidgetParameters(args.widgetParameter);
 
-const isDarkTheme = params.includes('dark');
-const padding = 0;
 const MEDIUM_WIDGET_HEIGHT = 176;
 const MAP_PANEL_SIZE = 176;
 
@@ -21,8 +19,6 @@ const MAP_PANEL_SIZE = 176;
   // https://github.com/adriankumpf/teslamate
   var TESLA_MATE_URL = "http(s)://[TeslaMate URL]"
 
-  var DATA = {}
-
 }
 
 let fm = FileManager.local();
@@ -34,7 +30,14 @@ if(!fm.isDirectory(fileRoot)) {
 const widget = new ListWidget();
 widget.setPadding(0, 0, 0, 0);
 
-if (config.runsInApp) {
+function parseWidgetParameters(widgetParameter) {
+  if (!widgetParameter) {
+    return [];
+  }
+  return widgetParameter.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+async function openTeslaMateWebView() {
   
   let wv = new WebView();
   await wv.loadURL(TESLA_MATE_URL);
@@ -52,28 +55,16 @@ if (config.runsInApp) {
   }
   
   wv.present(); 
-  return;
 }
 
-if (config.runsInAccessoryWidget) {
+async function renderAccessoryWidget() {
   
   let filename = `car_data_${TESLA_MATE_CAR_ID}.json`;
   let file = fm.joinPath(fileRoot, filename);
 
-  var data
-  try {
-    data = await getCarData();
-  }
-  catch (e) {
-    console.log(e)
-    if (!fm.fileExists(file)) {
-      throw e;
-    }
-    let json = await fm.readString(file);
-    data = JSON.parse(json);
-  }
+  const data = await loadCarDataWithCache(file);
   
-  car = data.data.status;
+  const car = data.data.status;
   
   {  
     let circle = new DrawContext();
@@ -97,18 +88,6 @@ if (config.runsInAccessoryWidget) {
       
     circle.setTextColor(Color.white())
     circle.setFont(Font.regularMonospacedSystemFont(12))
-    let offset = 0;
-    let km = `${car.battery_details.rated_battery_range}`.split('.')[0];
-    km = '88'
-    if (km.length == 1) {
-      offset = 8;
-    }
-    else if (km.length == 2) {
-      offset = 4
-    }
-    //circle.drawText(km, new Point(39 + offset, 70))
-      
-
     let iconData = Data.fromBase64String("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");
     if (car.state === "charging") {
       iconData = Data.fromBase64String("iVBORw0KGgoAAAANSUhEUgAAACgAAAAgCAYAAABgrToAAAAAAXNSR0IArs4c6QAAAKZlWElmTU0AKgAAAAgABgESAAMAAAABAAEAAAEaAAUAAAABAAAAVgEbAAUAAAABAAAAXgEoAAMAAAABAAIAAAExAAIAAAAVAAAAZodpAAQAAAABAAAAfAAAAAAAAABIAAAAAQAAAEgAAAABUGl4ZWxtYXRvciBQcm8gMi4wLjEAAAADoAEAAwAAAAEAAQAAoAIABAAAAAEAAAAooAMABAAAAAEAAAAgAAAAACk56h4AAAAJcEhZcwAACxMAAAsTAQCanBgAAAOVaVRYdFhNTDpjb20uYWRvYmUueG1wAAAAAAA8eDp4bXBtZXRhIHhtbG5zOng9ImFkb2JlOm5zOm1ldGEvIiB4OnhtcHRrPSJYTVAgQ29yZSA2LjAuMCI+CiAgIDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+CiAgICAgIDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PSIiCiAgICAgICAgICAgIHhtbG5zOmV4aWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20vZXhpZi8xLjAvIgogICAgICAgICAgICB4bWxuczp0aWZmPSJodHRwOi8vbnMuYWRvYmUuY29tL3RpZmYvMS4wLyIKICAgICAgICAgICAgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIj4KICAgICAgICAgPGV4aWY6UGl4ZWxZRGltZW5zaW9uPjMyPC9leGlmOlBpeGVsWURpbWVuc2lvbj4KICAgICAgICAgPGV4aWY6UGl4ZWxYRGltZW5zaW9uPjQwPC9leGlmOlBpeGVsWERpbWVuc2lvbj4KICAgICAgICAgPGV4aWY6Q29sb3JTcGFjZT4xPC9leGlmOkNvbG9yU3BhY2U+CiAgICAgICAgIDx0aWZmOlhSZXNvbHV0aW9uPjcyMDAwMC8xMDAwMDwvdGlmZjpYUmVzb2x1dGlvbj4KICAgICAgICAgPHRpZmY6UmVzb2x1dGlvblVuaXQ+MjwvdGlmZjpSZXNvbHV0aW9uVW5pdD4KICAgICAgICAgPHRpZmY6WVJlc29sdXRpb24+NzIwMDAwLzEwMDAwPC90aWZmOllSZXNvbHV0aW9uPgogICAgICAgICA8dGlmZjpPcmllbnRhdGlvbj4xPC90aWZmOk9yaWVudGF0aW9uPgogICAgICAgICA8eG1wOkNyZWF0b3JUb29sPlBpeGVsbWF0b3IgUHJvIDIuMC4xPC94bXA6Q3JlYXRvclRvb2w+CiAgICAgICAgIDx4bXA6TWV0YWRhdGFEYXRlPjIwMjMtMTAtMjBUMDY6NDc6NDhaPC94bXA6TWV0YWRhdGFEYXRlPgogICAgICA8L3JkZjpEZXNjcmlwdGlvbj4KICAgPC9yZGY6UkRGPgo8L3g6eG1wbWV0YT4KzcLdJQAAAutJREFUWAnNmDtoFUEUhu+q8YXGJliIaFJEfCIhRkQUAioKFira+GhtfKWJioKNkEYQJAg2VoKdBCGKCAE1jUkhRjEqdtYJCKIxPq/fH+8s++bO7NzggZ85c+acf//Z2Tuzd4NKHVatVteS1gVawRKwCCwATWBuDQGtYKyK8wf8Br/ATzANpsAEGAMjQRAo5mYIawN3QKPsOcRHndRR2A5GGqUswdtrJZLiANxLkDS6uy1L5JysILFd4HDOWKPCZ7OI8wQeyUq2iD0ktwO8sqg5xhKtTuanBJLUTNKOZKJF/wW5p8Ek2GxRp9T9yfyUQBK6wYZkokW/l63jI/mHLGpM6h7jmDZPoBm3bc8g7imroP3woG2xaqhdXlhHwihwsVsUzWzUtF0uBLWa2MRid5CEdtRvLZxB9uBjwue5ezo9ZC7L+6+yUtliHLUxgfT3Rgfr9F+SdwpxX5TPJHUM7pPvaDvhWJyqJdgJxoGt7Y6SUdwMuhPosyS9EeXUrJeBYUsSpffEiHI65PU7cB8P6Si+7kCgozD5iIScxiHnpAO3SsbASp25+mF8MIQWrTbkJ0CvU8aGeBaHTAfu7fi3wToTs2z7tLyXgS8LN3gIVwDXLcvoea0l6rScVV76A+7euAZh18vsTeCyZYnC2CYJbDW9ku1ApP4qfpm9MKSSwPSeEw7X7bwjc1DZ3L0TNBfk+zAJ1P+NsjbM8k4iTo/LpbJk0XoJ9GH3EadDvh+s90FoOLTNmPPTxFxa7fxt4IBLcVGNL4FF1yg15muJS4koKv7vBc4rUD/KmF6hlgJtRRuBT3sP2RT4CvR1IfW6T6xSJHCAreOakmT8lvSJY2EETfjzgeLi0WqYFdEPz3z20Fn9A+jTx/capuGWP2Nwt+BM1LqxpkhgLBFCXUizFWbNNGPd6iyLvqVkjfuM5V5LAt/kXOltTtx7mNX5BOmzLGIt8UXwDawBEqwlHKToEe1s2jkudgWsAvp3+Bnc/QtTj0hoQ7DeaQAAAABJRU5ErkJggg==");
@@ -125,11 +104,7 @@ if (config.runsInAccessoryWidget) {
   Script.setWidget(widget)
   widget.presentSmall()
   Script.complete();
-  return;
 }
-
-//widget.backgroundColor = Color.black();
-widget.backgroundColor = new Color("#292929", 100);
 
 function isLocationOutOfChina(latitude, longitude) {
   if (longitude < 72.004 || longitude > 137.8347 || latitude < 0.8293 || latitude > 55.8271)
@@ -189,13 +164,27 @@ async function getCarData() {
   return await req.loadJSON();
 }
 
-function hasCarMoved() {
+async function loadCarDataWithCache(file) {
+  try {
+    return await getCarData();
+  }
+  catch (error) {
+    console.log(error);
+    if (!fm.fileExists(file)) {
+      throw error;
+    }
+    const json = await fm.readString(file);
+    return JSON.parse(json);
+  }
+}
+
+function hasCarMoved(car) {
   return !car.prev_geodata ||
     car.car_geodata.latitude !== car.prev_geodata.latitude ||
     car.car_geodata.longitude !== car.prev_geodata.longitude;
 }
 
-async function getCarGeo(lat, lng) {
+async function getCarGeo(car, lat, lng) {
   let geo = wgs2gcj(lat, lng)
   let filename = "";
   let file = null;
@@ -210,7 +199,7 @@ async function getCarGeo(lat, lng) {
     console.log("Read Geo From Disk");
   }
   
-  if (json == null || hasCarMoved()) {
+  if (json == null || hasCarMoved(car)) {
     //const url = `https://restapi.amap.com/v3/geocode/regeo?output=json&extensions=all&location=${geo.longitude},${geo.latitude}&key=${AMAP_API_KEY}`;
     //let req = await new Request(url);
     //json = await req.loadString();
@@ -243,7 +232,7 @@ async function getCarGeo(lat, lng) {
   }
   
 
-  if (image == null || hasCarMoved()) {
+  if (image == null || hasCarMoved(car)) {
     let url = `https://restapi.amap.com/v3/staticmap?scale=2&location=${geo.longitude},${geo.latitude}&zoom=${zoom}&size=150*150&key=${AMAP_API_KEY}`
     let req = await new Request(url);
     try {
@@ -270,7 +259,7 @@ async function getCarGeo(lat, lng) {
     geofence = json?.regeocode?.pois[0]?.name || geofence;
   }
 
-  return await {
+  return {
 //    "geofence" : JSON.parse(json).regeocode.addressComponent.neighborhood.name,
     "geofence" : geofence,
     "latitude" : geo.latitude,
@@ -278,7 +267,7 @@ async function getCarGeo(lat, lng) {
     "lat" : lat,
     "lng" : lng,
     "image" : image
-  }
+  };
 }
 
 function calculateSidesLength(length, angle, size) {
@@ -298,27 +287,15 @@ function calculateSidesLength(length, angle, size) {
     return [size + parseInt(x.toFixed(0)), size - parseInt(y.toFixed(0))];
 }
 
-// Data Init
-{
+async function loadCarContext(widget) {
   
   // load pre data
   let filename = `car_data_${TESLA_MATE_CAR_ID}.json`;
   let file = fm.joinPath(fileRoot, filename);
 
-  var data
-  try {
-    data = await getCarData();
-  }
-  catch (e) {
-    console.log(e)
-    if (!fm.fileExists(file)) {
-      throw e;
-    }
-    let json = await fm.readString(file);
-    data = JSON.parse(json);
-  }
+  const data = await loadCarDataWithCache(file);
   
-  car = data.data.status;
+  const car = data.data.status;
   
   if (fm.fileExists(file)) {
     try {
@@ -335,11 +312,6 @@ function calculateSidesLength(length, angle, size) {
     car.prev_geodata = car.car_geodata;
   }
 
-  //car.state = "charging";
-  //car.state = "driving"
-  //car.prev_geodata.latitude = 1
-  //car.driving_details.speed = 100;
-  
   if (car.state === "driving") {
     widget.refreshAfterDate = new Date(Date.now() + 1000 * 10);
   }
@@ -350,16 +322,21 @@ function calculateSidesLength(length, angle, size) {
     widget.refreshAfterDate = new Date(Date.now() + 1000 * 60);
   }
   
-  let geo = await getCarGeo(car.car_geodata.latitude, car.car_geodata.longitude)
+  let geo = await getCarGeo(car, car.car_geodata.latitude, car.car_geodata.longitude)
   car.car_geo = geo;
 
   console.log("Write Data to Disk")
   fm.writeString(file, JSON.stringify(data));
+
+  return car;
 }
 
+async function renderMediumWidget() {
+widget.backgroundColor = new Color("#292929", 100);
+const car = await loadCarContext(widget);
 
-// Widget UI  
-
+// Widget UI
+function createMediumLayout(widget) {
 let layout = widget.addStack();
 layout.layoutVertically();
 //layout.setPadding(0, 0, 0, 0)
@@ -380,9 +357,13 @@ right.layoutVertically();
 right.size = new Size(MAP_PANEL_SIZE, MEDIUM_WIDGET_HEIGHT)
 right.setPadding(0, 0, 0, 0)
 
+return { left, right };
+}
+
+const { left, right } = createMediumLayout(widget);
 
 // Car Info
-{
+function renderCarInfo(left, car) {
   
   let stack = left.addStack()
   stack.centerAlignContent();
@@ -499,8 +480,10 @@ right.setPadding(0, 0, 0, 0)
 
 }
 
+renderCarInfo(left, car);
+
 // Battery Info
-{
+function renderBatteryInfo(left, car) {
   
   left.addSpacer(15)
   
@@ -589,8 +572,10 @@ right.setPadding(0, 0, 0, 0)
   
 }
 
+renderBatteryInfo(left, car);
+
 // Charging Status
-{
+function renderChargingStatus(left, car) {
   if (car.state === "charging") {
 
     let time = Math.floor(car.charging_details.time_to_full_charge * 60);
@@ -613,8 +598,10 @@ right.setPadding(0, 0, 0, 0)
   }
 }
 
+renderChargingStatus(left, car);
+
 // Car Status
-{
+function renderCarStatus(left, car) {
   left.addSpacer(15)
   
   let stack = left.addStack();
@@ -676,8 +663,10 @@ right.setPadding(0, 0, 0, 0)
   }
 }
 
+renderCarStatus(left, car);
+
 // Location Info
-{
+function renderLocationInfo(left, car) {
   
   left.addSpacer(15)
  
@@ -712,9 +701,11 @@ right.setPadding(0, 0, 0, 0)
   
 }
 
+renderLocationInfo(left, car);
+
 
 // Map
-{
+function renderMap(right, car) {
   let stack = right.addStack();
   stack.setPadding(0, 0, 0, 0)
   stack.size = new Size(MAP_PANEL_SIZE, MEDIUM_WIDGET_HEIGHT)
@@ -769,6 +760,25 @@ right.setPadding(0, 0, 0, 0)
     
 }
 
+renderMap(right, car);
+
 Script.setWidget(widget)
 widget.presentMedium()
 Script.complete();
+}
+
+async function main() {
+  if (config.runsInApp) {
+    await openTeslaMateWebView();
+    return;
+  }
+
+  if (config.runsInAccessoryWidget) {
+    await renderAccessoryWidget();
+    return;
+  }
+
+  await renderMediumWidget();
+}
+
+await main();

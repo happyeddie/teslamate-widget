@@ -28,6 +28,17 @@
 2. 锁屏 accessory widget：`config.runsInAccessoryWidget` 为真时，拉取或读取缓存车辆数据，绘制圆形电量图。
 3. 桌面 widget：默认路径，拉取车辆状态、地理编码和地图，构建中号 widget。
 
+项目继续采用单文件分发，用户只需安装和配置 `Telsa Car.js`。脚本内部按职责划分为命名函数：
+
+- `main()`：仅根据 Scriptable 运行上下文分发执行路径。
+- `openTeslaMateWebView()`：处理 App 内 TeslaMate 页面展示。
+- `loadCarDataWithCache()`：统一处理 TeslaMateApi 请求和车辆缓存回退。
+- `loadCarContext()`：组合车辆数据、历史坐标、刷新时间、地理信息和地图。
+- `renderAccessoryWidget()`：绘制并提交锁屏圆形 Widget。
+- `renderMediumWidget()`：组织中号 Widget，并分别调用车辆、电池、充电、控制状态、位置和地图渲染函数。
+
+这种结构不依赖 `importModule()` 或构建流程，保持单文件安装体验，同时避免运行分支、缓存逻辑和 UI 绘制继续堆叠在顶层作用域。
+
 ## 数据流
 
 ```mermaid
