@@ -46,8 +46,8 @@
 | 能力 | 当前用途 | 代码位置 |
 | --- | --- | --- |
 | `args.widgetParameter` | 解析车 ID 和主题参数 | `Telsa Car.js:4` |
-| `config.runsInApp` | App 内配置管理或打开 TeslaMate WebView | `Telsa Car.js:1231` |
-| `config.runsInAccessoryWidget` | 锁屏 widget 分支 | `Telsa Car.js:1237` |
+| `config.runsInApp` | `main()` 中：配置缺失时进入表单；已配置时显示菜单，按用户选择管理配置或打开 TeslaMate WebView | `main()` 的 App 配置门禁与 App 菜单分支 |
+| `config.runsInAccessoryWidget` | `main()` 中：通过配置门禁后进入锁屏 accessory widget 渲染分支 | `main()` 的 accessory 分支 |
 | `Keychain.contains()` / `get()` / `set()` | 读取和保存单个版本化运行配置 | `Telsa Car.js:185`, `Telsa Car.js:220` |
 | `Alert` | App 内操作菜单、安全配置表单和状态提示 | `Telsa Car.js:238`, `Telsa Car.js:274`, `Telsa Car.js:398` |
 | `FileManager.local()` | 配置门禁通过后缓存车辆数据、地图和地理编码 | `Telsa Car.js:323` |
