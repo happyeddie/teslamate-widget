@@ -257,26 +257,45 @@ class WebView {
    * 使用场景：生产脚本必须等待 `present()` 完成后才能调用 `Script.complete()`，否则
    * App 页面可能尚未关闭就结束脚本。无入参，成功返回 Promise<void>；通过运行时配置
    * 可在 load、evaluate 或 present 三阶段抛出自定义 Error。开始和完成事件写入独立
-   * 生命周期数组，供测试检查顺序；中间 `await` 是关键，它能让未 await 的生产代码
-   * 暴露出“Script.complete 早于展示完成”的回归。
+   * 生命周期数组，供测试检查顺序；中间等待的是 Node 外层的下一事件循环，而非已经
+   * 排队的微任务。这能保证生产代码删掉 await 时，`Script.complete` 必然先于展示完成，
+   * 从而让生命周期测试可靠暴露回归。
    */
   async present() {
-    WebView.lifecycle.push("webview.present:start");
-    await Promise.resolve();
-    WebView.throwConfiguredFailure("present");
+    // 捕获本次实例的状态引用，避免未等待的旧展示在下一次 runtime 重置静态状态后污染新快照。
+    const lifecycle = WebView.lifecycle;
+    const failures = WebView.failures;
+    lifecycle.push("webview.present:start");
+    await WebView.waitForNextEventLoop();
+    WebView.throwConfiguredFailure("present", failures);
     this.presented = true;
-    WebView.lifecycle.push("webview.present:complete");
+    lifecycle.push("webview.present:complete");
+  }
+
+  /**
+   * 等待 Node 宿主的下一事件循环阶段。
+   *
+   * 使用场景：runtime 需要将 WebView 展示完成与生产脚本当前微任务链明确分隔，验证
+   * `await wv.present()` 不是偶然依赖 Promise 调度顺序。无入参，返回会在下一轮事件
+   * 循环 resolve 的 Promise；不接收或记录生产配置，因此不存在敏感值泄露路径。选择
+   * `setImmediate` 而非 `Promise.resolve()` 的依据是后者仍处于同一微任务队列，删除
+   * 生产 await 时可能因后续 await 链的排队顺序而产生假阳性。
+   */
+  static waitForNextEventLoop() {
+    return new Promise((resolve) => setImmediate(resolve));
   }
 
   /**
    * 按当前测试配置抛出 WebView 阶段故障。
    *
    * 使用场景：安全回归测试需要让加载、脚本注入和展示分别携带虚构的 URL/Key。入参
-   * `operation` 只能是 load、evaluate 或 present；无正常业务返回值。配置为 Error 时
-   * 原样抛出，其他真值抛固定 Mock Error，未配置时不产生副作用。
+   * `operation` 只能是 load、evaluate 或 present，`failures` 是可选的本次实例故障
+   * 快照；无正常业务返回值。配置为 Error 时原样抛出，其他真值抛固定 Mock Error，
+   * 未配置时不产生副作用。present 在异步等待前捕获 failures，防止下一次 runtime 的
+   * 静态配置覆盖尚未完成的旧实例。
    */
-  static throwConfiguredFailure(operation) {
-    const configuredFailure = WebView.failures[operation];
+  static throwConfiguredFailure(operation, failures = WebView.failures) {
+    const configuredFailure = failures[operation];
     if (configuredFailure instanceof Error) {
       throw configuredFailure;
     }

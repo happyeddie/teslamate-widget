@@ -598,6 +598,28 @@ test("App 打开 TeslaMate 时等待 WebView 展示完成再结束脚本", async
 });
 
 /**
+ * 验证 runtime 会把遗漏 await 的 WebView 展示稳定暴露为错误生命周期顺序。
+ *
+ * 使用场景：上一项生产路径测试依赖此行为来阻止 `await wv.present()` 被误删。入参为
+ * node:test 上下文；无返回值。临时脚本故意不等待 `present()` 并立即完成；由于 runtime
+ * 使用下一事件循环而非微任务延迟，快照必须先记录 `script.complete`。测试末尾主动等待
+ * 一轮事件循环，让故意遗留的展示 Promise 完成，避免影响后续 runtime 的静态状态。
+ */
+test("runtime 可稳定识别未等待的 WebView 展示", async (t) => {
+  const result = await runScriptableScript({
+    scriptPath: writeRuntimeTestScript(t, `
+      const webView = new WebView();
+      webView.present();
+      Script.complete();
+    `)
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.deepEqual(result.lifecycle, ["webview.present:start", "script.complete"]);
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+/**
  * 验证 WebView 各阶段失败都会转换为固定脱敏错误。
  *
  * 使用场景：页面加载、样式注入和展示关闭都可能抛出带私有 Web 地址或 API Key 的系统

@@ -146,7 +146,7 @@ Keychain 属于设备侧安全存储。不同设备或重新安装、迁移 Scri
 - `car_map_<carId>.json`：反向地理编码结果。
 - `car_map_<carId>.png`：静态地图图片。
 
-当 TeslaMateApi 请求失败时，脚本会尝试读取 `car_data_<carId>.json`。如果首跑没有缓存，脚本应继续抛出真实错误，避免显示伪数据。
+当 TeslaMateApi 请求失败时，脚本会尝试读取 `car_data_<carId>.json`。如果首跑没有缓存，脚本会抛出固定脱敏错误，避免显示伪数据，也不让 Request 原始异常中的私有地址进入 Scriptable 错误界面。
 
 ## 本地测试架构
 
