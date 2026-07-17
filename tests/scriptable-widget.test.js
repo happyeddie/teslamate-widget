@@ -122,6 +122,29 @@ function assertSensitiveValuesAbsent(result, sensitiveValues) {
 }
 
 /**
+ * 判断源码是否包含未通过词法声明引入的 carId 写操作。
+ *
+ * 使用场景：静态审计必须识别块内直接赋值、复合赋值、自增自减，以及
+ * `globalThis.carId`、`globalThis["carId"]` 等全局属性写入。入参为待审计源码字符串；
+ * 命中任一常见写操作返回 true，否则返回 false。方法先移除合法的 const/let/var
+ * 声明标记，再检查所有剩余 carId 赋值，避免把 main 内的局部常量误判为隐式全局。
+ */
+function containsImplicitCarIdWrite(source) {
+  const assignmentOperator = "(?:\\*\\*=|>>>=|<<=|>>=|&&=|\\|\\|=|\\?\\?=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|=(?!=)|\\+\\+|--)";
+  const sourceWithoutDeclarations = source.replace(
+    /\b(?:const|let|var)\s+carId\s*(?==)/g,
+    ""
+  );
+  const directWrite = new RegExp(`\\bcarId\\s*${assignmentOperator}`);
+  const computedGlobalWrite = new RegExp(
+    `\\b(?:globalThis|this|window)\\s*\\[\\s*["']carId["']\\s*\\]\\s*${assignmentOperator}`
+  );
+
+  return directWrite.test(sourceWithoutDeclarations) ||
+    computedGlobalWrite.test(sourceWithoutDeclarations);
+}
+
+/**
  * 为 runtime 能力测试创建临时 Scriptable 脚本。
  *
  * 使用场景：测试尚未被主脚本使用的 Scriptable 全局 API，避免为了测试 stub
@@ -372,7 +395,7 @@ test("源码只使用显式 runtime 配置与车辆 ID 参数链", () => {
   assert.match(source, /async function loadCarContext\(runtimeContext, runtimeConfig, carId\)/);
   assert.match(source, /async function renderMediumWidget\(runtimeContext, runtimeConfig, carId\)/);
   assert.match(source, /function renderCarInfo\(left, car, runtimeConfig\)/);
-  assert.doesNotMatch(source, /^\s*(?:id|carId)\s*=/m);
+  assert.equal(containsImplicitCarIdWrite(source), false);
   assert.doesNotMatch(
     source,
     /console\.log\s*\([^)]*\b(?:error|err|exception|e)\b[^)]*\)/
@@ -382,6 +405,40 @@ test("源码只使用显式 runtime 配置与车辆 ID 参数链", () => {
     source,
     /if \(image == null \|\| hasCarMoved\(car\)\) \{\s*let url =/
   );
+});
+
+/**
+ * 验证 carId 静态门禁能区分合法词法声明和常见隐式全局写入。
+ *
+ * 使用场景：防止后续格式调整把赋值移入代码块后绕过行首正则。无业务入参；测试以
+ * 最小源码片段覆盖直接赋值、复合赋值、自增自减、点属性和计算属性写入，并保留
+ * `const/let/var carId` 与函数参数的合法样例。任一分类错误均由 node:assert 报告。
+ */
+test("隐式 carId 门禁覆盖块内、复合赋值和全局属性写入", () => {
+  const implicitWriteCases = [
+    "if (enabled) { carId = 2; }",
+    "function update() { carId += 1; }",
+    "while (ready) { carId++; }",
+    "globalThis.carId = 2;",
+    "globalThis['carId'] ||= 2;",
+    "this[\"carId\"] = 2;",
+    "window.carId--"
+  ];
+  const lexicalCases = [
+    "const carId = 2;",
+    "let carId = 2;",
+    "var carId = 2;",
+    "function render(carId) { return carId; }"
+  ];
+
+  // 每个危险片段必须独立命中，避免某一种赋值语法覆盖不足却被其他样例掩盖。
+  for (const source of implicitWriteCases) {
+    assert.equal(containsImplicitCarIdWrite(source), true, `未识别隐式写入：${source}`);
+  }
+  // 合法局部声明与参数读取不得误报，否则生产源码中的显式参数链无法通过审计。
+  for (const source of lexicalCases) {
+    assert.equal(containsImplicitCarIdWrite(source), false, `误报合法 carId：${source}`);
+  }
 });
 
 test("中号桌面 widget 地图图片填满右侧容器", async (t) => {
@@ -796,6 +853,72 @@ test("Keychain 对四类配置失败操作抛出固定测试错误", async (t) =
 });
 
 /**
+ * 验证 Keychain contains/get/set 可直接抛出调用方提供的 Error。
+ *
+ * 使用场景：安全测试需要让异常消息真实携带虚构 Key 和完整 URL，证明生产代码不会
+ * 打印异常对象。入参为 node:test 上下文；无返回值。每个操作使用独立 sentinel Error
+ * 和临时脚本，runtime 若改写为默认 Mock 错误或吞掉原错误，assert.rejects 会失败。
+ */
+test("Keychain 故障注入支持 contains、get、set 自定义 Error", async (t) => {
+  const documentsDirectory = createRuntimeDocumentsDirectory(t);
+  const failureCases = [
+    { operation: "contains", source: "Keychain.contains(\"configured\");" },
+    { operation: "get", source: "Keychain.get(\"configured\");" },
+    { operation: "set", source: "Keychain.set(\"configured\", \"value\");" }
+  ];
+
+  // 自定义消息同时携带虚构 Key 与完整 URL，确保接口满足后续脱敏业务测试的输入要求。
+  for (const failureCase of failureCases) {
+    const customError = new Error(
+      `sentinel ${failureCase.operation}: ${SENTINEL_AMAP_API_KEY} ${SENTINEL_API_BASE_URL}`
+    );
+    await assert.rejects(
+      runScriptableScript({
+        documentsDirectory,
+        keychainFailures: { [failureCase.operation]: customError },
+        keychainValues: { configured: "value" },
+        scriptPath: writeRuntimeTestScript(t, failureCase.source)
+      }),
+      customError
+    );
+  }
+});
+
+/**
+ * 验证图片请求故障同时兼容默认 Mock Error 和调用方自定义 Error。
+ *
+ * 使用场景：高德脱敏测试需要让 Request.loadImage() 抛出含 Key 与完整 URL 的 Error，
+ * 既有测试仍依赖 `failImages: true` 的固定错误。入参为 node:test 上下文；无返回值。
+ * 两种配置分别运行同一临时脚本，错误类型或消息不符会由 assert.rejects 报告。
+ */
+test("图片请求故障注入支持自定义 Error 并兼容默认错误", async (t) => {
+  const requestUrl = `https://maps.example.test/static?key=${SENTINEL_AMAP_API_KEY}`;
+  const scriptPath = writeRuntimeTestScript(t, `
+    const request = new Request("${requestUrl}");
+    await request.loadImage();
+  `);
+
+  await assert.rejects(
+    runScriptableScript({
+      documentsDirectory: createRuntimeDocumentsDirectory(t),
+      failImages: true,
+      scriptPath
+    }),
+    new Error("Mock image request failed")
+  );
+
+  const customError = new Error(`sentinel image failure: ${requestUrl}`);
+  await assert.rejects(
+    runScriptableScript({
+      documentsDirectory: createRuntimeDocumentsDirectory(t),
+      failImages: customError,
+      scriptPath
+    }),
+    customError
+  );
+});
+
+/**
  * 验证未保存的 Keychain 键不会被解释为空配置。
  *
  * 使用场景：配置首次运行时区分“未配置”和“配置为空”的业务分支。入参为 node:test
@@ -982,8 +1105,9 @@ test("TeslaMate 请求失败日志不泄露 Key 或完整 URL", async (t) => {
  * Alert 消息及 Widget 文案保持脱敏，渲染生命周期仍正常完成。
  */
 test("高德地图图片失败日志不泄露 Key 或完整 URL", async (t) => {
+  const sentinelAmapUrl = `https://restapi.amap.com/v3/staticmap?sentinel=1&key=${SENTINEL_AMAP_API_KEY}`;
   const result = await runScriptableScript({
-    failImages: true,
+    failImages: new Error(`sentinel Amap image failure: ${sentinelAmapUrl}`),
     jsonResponse: apiResponse(carStatus("online")),
     keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
     runsInWidget: true,
@@ -999,7 +1123,7 @@ test("高德地图图片失败日志不泄露 Key 或完整 URL", async (t) => {
   assert.ok(result.logs.includes("静态地图加载失败"));
   assert.equal(result.logs.some((line) => line.includes("Mock image request failed")), false);
   assert.equal(result.script.completed, true);
-  assertSensitiveValuesAbsent(result, [SENTINEL_AMAP_API_KEY, amapRequest.url]);
+  assertSensitiveValuesAbsent(result, [SENTINEL_AMAP_API_KEY, sentinelAmapUrl, amapRequest.url]);
 });
 
 /**
@@ -1070,8 +1194,22 @@ test("损坏车辆缓存读取失败时记录固定脱敏日志", async (t) => {
  */
 test("Keychain contains、get、set 失败不会泄露配置", async (t) => {
   const readFailureCases = [
-    { name: "contains", keychainFailures: { contains: true } },
-    { name: "get", keychainFailures: { get: true } }
+    {
+      name: "contains",
+      keychainFailures: {
+        contains: new Error(
+          `sentinel contains failure: ${SENTINEL_AMAP_API_KEY} ${SENTINEL_API_BASE_URL}`
+        )
+      }
+    },
+    {
+      name: "get",
+      keychainFailures: {
+        get: new Error(
+          `sentinel get failure: ${SENTINEL_AMAP_API_KEY} ${SENTINEL_API_BASE_URL}`
+        )
+      }
+    }
   ];
 
   // 两种读取 API 失败都由同一个配置门禁处理，但分别运行以证明每个异常点均被覆盖。
@@ -1110,7 +1248,11 @@ test("Keychain contains、get、set 失败不会泄露配置", async (t) => {
         },
         { index: 0 }
       ],
-      keychainFailures: { set: true },
+      keychainFailures: {
+        set: new Error(
+          `sentinel set failure: ${newSentinelKey} ${newSentinelApiUrl} ${newSentinelWebUrl}`
+        )
+      },
       keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
       runsInApp: true
     });

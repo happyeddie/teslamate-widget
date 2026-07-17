@@ -270,11 +270,13 @@ function serialize(value) {
  * 使用场景：本项目的生产脚本依赖 iOS Scriptable 全局 API，无法直接在 Node 环境
  * 运行；测试通过本方法提供受控的 API stub、网络响应、文件目录和用户交互编排，验证
  * widget、缓存及配置流程的业务结果。入参 `options` 可覆盖脚本路径、documents
- * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures` 和
- * `alertResponses`；未传入的可选项使用测试安全的默认值。成功时返回 documents 路径、
- * 请求/日志/Widget/WebView 快照，以及最终 Keychain 和 Alert 观测结果；返回值均不
- * 持有内部可变集合。读取脚本、创建临时目录、VM 执行或被测脚本中的异常会原样向调用
- * 方抛出，交互响应不足和 Keychain 故障也以固定错误供测试精确断言。
+ * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures`、
+ * `failImages` 和 `alertResponses`；未传入的可选项使用测试安全的默认值。
+ * `keychainFailures.<operation>` 与 `failImages` 可传布尔值或 Error：true 使用向后兼容
+ * 的固定 Mock Error，Error 实例则原样抛出，供安全测试携带虚构敏感信息。成功时返回
+ * documents 路径、请求/日志/Widget/WebView 快照，以及最终 Keychain 和 Alert 观测
+ * 结果；返回值均不持有内部可变集合。读取脚本、创建临时目录、VM 执行或被测脚本中的
+ * 异常会原样向调用方抛出，交互响应不足也使用固定错误供测试精确断言。
  */
 async function runScriptableScript(options = {}) {
   const scriptPath = options.scriptPath || path.join(__dirname, "..", "Telsa Car.js");
@@ -290,8 +292,8 @@ async function runScriptableScript(options = {}) {
    * `options.keychainFailures`；`alerts` 与最终 Keychain 值会作为结果快照返回，
    * `alertResponses` 仅供消费而不返回。响应仅在数组输入时逐项克隆，否则按空队列
    * 处理：这是为了让缺失编排在 Alert 展示时抛出固定错误，而不是静默选取动作。
-   * Keychain 失败标记被规整为完整的四个布尔字段，保证未声明的操作不会意外失败；
-   * 克隆初始值避免被测脚本修改调用方传入的配置对象。
+   * Keychain 失败配置被规整为完整的四个字段，保留调用方 Error 实例，并让未声明的
+   * 操作使用 false；克隆初始值避免被测脚本修改调用方传入的配置对象。
    */
   const alerts = [];
   const alertResponses = Array.isArray(options.alertResponses)
@@ -300,10 +302,10 @@ async function runScriptableScript(options = {}) {
   const fileManager = new TestFileManager(documentsDirectory);
   const keychainValues = clone(options.keychainValues || {});
   const keychainFailures = {
-    contains: Boolean(options.keychainFailures?.contains),
-    get: Boolean(options.keychainFailures?.get),
-    set: Boolean(options.keychainFailures?.set),
-    remove: Boolean(options.keychainFailures?.remove)
+    contains: options.keychainFailures?.contains || false,
+    get: options.keychainFailures?.get || false,
+    set: options.keychainFailures?.set || false,
+    remove: options.keychainFailures?.remove || false
   };
   const scriptState = {
     completed: false,
@@ -316,8 +318,8 @@ async function runScriptableScript(options = {}) {
    * 按测试选项注入 Keychain 操作失败。
    *
    * 使用场景：验证生产脚本在 Scriptable 安全存储不可用时的回退逻辑。入参为
-   * `contains`、`get`、`set` 或 `remove`；无返回值。仅当对应布尔开关为 true 时
-   * 抛出固定错误，调用方应自行处理该异常。
+   * `contains`、`get`、`set` 或 `remove`；无返回值。对应配置为 Error 时原样抛出，
+   * 为其他真值时抛出固定错误，调用方应自行处理该异常。
    */
   function throwKeychainFailure(operation) {
     /**
@@ -325,10 +327,17 @@ async function runScriptableScript(options = {}) {
      *
      * 使用场景：通过单独开启 `contains`、`get`、`set` 或 `remove`，复现安全存储
      * 在对应 API 调用处失败的业务分支。入参为经过内部调用限定的操作名；无正常
-     * 返回值。只有对应布尔标记为 true 才进入异常分支并抛出固定错误，false 或未配置
-     * 时直接返回，让实际的内存存储操作继续执行；固定错误文本用于测试精确匹配。
+     * 返回值。对应配置是 Error 时原样抛出，使安全测试能够验证含 sentinel 的异常不会
+     * 泄漏；其他真值抛出向后兼容的固定错误，false 或未配置时直接返回，让实际内存
+     * 存储操作继续执行。
      */
-    if (keychainFailures[operation]) {
+    const configuredFailure = keychainFailures[operation];
+    // Error 必须优先于普通真值处理，否则会丢失测试刻意注入的敏感消息。
+    if (configuredFailure instanceof Error) {
+      throw configuredFailure;
+    }
+    // 既有布尔 true 和其他真值继续使用固定消息，保持旧测试与调用方兼容。
+    if (configuredFailure) {
       throw new Error(`Mock Keychain ${operation} failed`);
     }
   }
@@ -537,6 +546,11 @@ async function runScriptableScript(options = {}) {
     }
 
     async loadImage() {
+      // 自定义 Error 原样抛出，让脱敏测试可携带虚构 Key 与完整 URL 并观察生产降级。
+      if (options.failImages instanceof Error) {
+        throw options.failImages;
+      }
+      // 布尔 true 保持历史固定错误，避免改变既有 runtime 测试接口。
       if (options.failImages) {
         throw new Error("Mock image request failed");
       }
