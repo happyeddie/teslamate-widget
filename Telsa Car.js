@@ -227,6 +227,92 @@ function saveRuntimeConfig(input) {
 }
 
 /**
+ * 使用独立原生 Alert 展示不含敏感配置值的状态消息。
+ *
+ * 使用场景：配置校验失败、Keychain 写入失败或保存成功后，需要等待用户明确确认再
+ * 继续或结束流程。入参 `title` 和 `message` 只能由调用方传入固定业务文案；无业务
+ * 返回值，Alert 展示异常原样抛出。该方法不接收配置对象，避免误把 Key 或私有 URL
+ * 拼接进提示内容。
+ */
+async function presentMessage(title, message) {
+  const alert = new Alert();
+  alert.title = title;
+  alert.message = message;
+  alert.addAction("确定");
+  await alert.presentAlert();
+}
+
+/**
+ * 循环展示单脚本运行配置表单，并在用户确认后校验和保存完整 schema v1 配置。
+ *
+ * 使用场景：首次运行缺少配置时直接调用，或从 App 操作菜单进入管理配置时调用。
+ * 入参 `initialConfig` 为已验证配置或 null；成功保存返回标准化配置，取消、保存失败
+ * 返回 null。文本框固定按高德 Key、TeslaMateApi URL、TeslaMate Web URL 排列，Key
+ * 使用安全文本框；校验失败会保留本次原始输入重试，所有状态提示均使用固定脱敏
+ * 文案。Alert 或 Keychain 之外的意外异常原样抛出。
+ */
+async function presentConfigForm(initialConfig) {
+  let formValues;
+  // 已配置入口预填当前标准化值，首次配置入口使用空值；分支只处理可信配置或 null。
+  if (initialConfig) {
+    formValues = {
+      amapApiKey: initialConfig.amapApiKey,
+      teslaMateApiBaseUrl: initialConfig.teslaMateApiBaseUrl,
+      teslaMateWebUrl: initialConfig.teslaMateWebUrl
+    };
+  }
+  else {
+    formValues = {
+      amapApiKey: "",
+      teslaMateApiBaseUrl: "",
+      teslaMateWebUrl: ""
+    };
+  }
+
+  // 只有校验失败需要回到表单；取消、保存成功或存储失败都会从对应分支明确返回。
+  while (true) {
+    const form = new Alert();
+    form.title = "管理配置";
+    form.message = "配置将保存在 iOS Keychain 中";
+    form.addSecureTextField("高德 API Key", formValues.amapApiKey);
+    form.addTextField("TeslaMateApi 基础 URL", formValues.teslaMateApiBaseUrl);
+    form.addTextField("TeslaMate Web URL", formValues.teslaMateWebUrl);
+    form.addAction("保存");
+    form.addCancelAction("取消");
+
+    const actionIndex = await form.presentAlert();
+    // 只有固定下标 0 表示保存；取消或无效下标不得读取、校验或写入表单内容。
+    if (actionIndex !== 0) {
+      return null;
+    }
+
+    const candidate = {
+      schemaVersion: 1,
+      amapApiKey: form.textFieldValue(0),
+      teslaMateApiBaseUrl: form.textFieldValue(1),
+      teslaMateWebUrl: form.textFieldValue(2)
+    };
+    const validationResult = validateRuntimeConfig(candidate);
+    // 校验失败时保留未标准化原始输入，方便用户只修正错误字段；提示不回显具体值。
+    if (!validationResult.ok) {
+      formValues = candidate;
+      await presentMessage("配置无效", "请检查所有配置项后重试");
+      continue;
+    }
+
+    const saveResult = saveRuntimeConfig(validationResult.value);
+    // 候选已通过校验，此处失败只代表 Keychain 写入异常；旧值由配置核心保证不变。
+    if (!saveResult.ok) {
+      await presentMessage("保存失败", "无法保存配置，请稍后重试");
+      return null;
+    }
+
+    await presentMessage("保存成功", "配置已安全保存");
+    return saveResult.value;
+  }
+}
+
+/**
  * 惰性创建正常 Widget 所需的文件缓存与渲染对象。
  *
  * 使用场景：仅在运行配置通过门禁后调用，确保首次未配置或读取失败不会创建 tesla
@@ -298,6 +384,34 @@ async function openTeslaMateWebView(runtimeConfig, carId) {
   }
   
   wv.present(); 
+}
+
+/**
+ * 展示已配置 App 的操作菜单，并按固定动作下标打开页面或进入配置管理。
+ *
+ * 使用场景：Scriptable 在 App 内运行且 Keychain 配置已验证。入参为标准化
+ * `runtimeConfig` 和当前 `carId`；无业务返回值。菜单固定使用 sheet，动作下标 0
+ * 调用 WebView，下标 1 调用配置表单，取消或任何其他返回值直接结束；下游异常原样
+ * 抛出，调用方负责完成 Script 生命周期。
+ */
+async function presentAppMenu(runtimeConfig, carId) {
+  const menu = new Alert();
+  menu.title = "TeslaMate Widget";
+  menu.message = "请选择要执行的操作";
+  menu.addAction("打开 TeslaMate");
+  menu.addAction("管理配置");
+  menu.addCancelAction("取消");
+
+  const actionIndex = await menu.presentSheet();
+  // 固定下标 0 只负责打开 TeslaMate，不允许同时进入配置表单。
+  if (actionIndex === 0) {
+    await openTeslaMateWebView(runtimeConfig, carId);
+    return;
+  }
+  // 固定下标 1 进入已预填表单；取消和越界下标不执行任何业务动作。
+  if (actionIndex === 1) {
+    await presentConfigForm(runtimeConfig);
+  }
 }
 
 /**
@@ -1099,15 +1213,22 @@ Script.complete();
  *
  * 使用场景：脚本顶层仅调用一次。无入参；无业务返回值。方法先读取并验证 Keychain
  * 配置，再按 App、accessory 或中号上下文分流。配置不可用时 Widget 只显示提示，App
- * 在 Task 3 接入表单前安全完成；只有有效 Widget 配置才创建文件缓存运行上下文。
+ * 直接进入首次配置表单；只有有效 Widget 配置才创建文件缓存运行上下文。App 已配置
+ * 时先展示操作菜单，交互完成后统一结束 Script 生命周期。
  */
 async function main() {
   const runtimeConfig = loadRuntimeConfig();
   const carId = params.find((item) => /^\d+$/.test(item)) || 1;
 
-  // 配置不可用时禁止创建缓存与请求；Widget 显示提示，App 暂时正常结束等待配置表单。
+  // 配置不可用时禁止创建缓存与请求；App 直接配置，Widget 仅显示无副作用提示。
   if (!runtimeConfig) {
-    // 仅 Widget 上下文需要可见提示；App 配置入口将在下一任务接管同一分支。
+    // App 首次运行优先进入表单，避免依赖不存在的配置创建 WebView 或文件缓存。
+    if (config.runsInApp) {
+      await presentConfigForm(null);
+      Script.complete();
+      return;
+    }
+    // 非 App 的 Widget 上下文无法交互，只渲染引导用户回到 Scriptable 的提示。
     if (config.runsInWidget || config.runsInAccessoryWidget) {
       renderMissingConfigWidget(config.widgetFamily);
       return;
@@ -1116,9 +1237,9 @@ async function main() {
     return;
   }
 
-  // App 路径只使用 WebView，不创建 Widget 文件缓存；Task 3 将在此增加操作菜单。
+  // App 路径只展示操作菜单及其下游界面，不创建 Widget 文件缓存。
   if (config.runsInApp) {
-    await openTeslaMateWebView(runtimeConfig, carId);
+    await presentAppMenu(runtimeConfig, carId);
     Script.complete();
     return;
   }

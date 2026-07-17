@@ -361,8 +361,16 @@ test("锁屏 accessory widget 可以完成圆形电量图渲染", async (t) => {
   assert.equal(collectByType(result.widget, "image").length, 1);
 });
 
-test("App 内运行时打开 TeslaMate WebView 并隐藏非当前车辆卡片", async (t) => {
+/**
+ * 验证已配置 App 菜单的打开动作使用标准化配置进入指定车辆 WebView。
+ *
+ * 使用场景：用户在 Scriptable 内运行脚本并从操作菜单选择打开 TeslaMate。入参为
+ * node:test 上下文；无返回值。测试断言菜单展示样式、固定动作顺序以及 WebView
+ * 车辆筛选结果，任一交互或页面行为不符时由 node:assert 抛出。
+ */
+test("App 操作菜单选择打开 TeslaMate 时展示当前车辆 WebView", async (t) => {
   const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }],
     jsonResponse: apiResponse(carStatus("online")),
     keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
     runsInApp: true,
@@ -370,6 +378,14 @@ test("App 内运行时打开 TeslaMate WebView 并隐藏非当前车辆卡片", 
   });
   t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
 
+  assert.deepEqual(result.alerts[0], {
+    actions: ["打开 TeslaMate", "管理配置"],
+    cancelAction: "取消",
+    message: "请选择要执行的操作",
+    presentation: "sheet",
+    textFields: [],
+    title: "TeslaMate Widget"
+  });
   assert.equal(result.webViews.length, 1);
   assert.equal(result.webViews[0].loadedURL, "https://teslamate.example.test:1");
   assert.equal(result.webViews[0].presented, true);
@@ -378,24 +394,244 @@ test("App 内运行时打开 TeslaMate WebView 并隐藏非当前车辆卡片", 
 });
 
 /**
- * 验证 App 配置路径始终返回可观察的 Keychain 与 Alert 空状态。
+ * 验证已配置 App 菜单可以进入预填表单，并允许用户取消而不改动安全存储。
  *
- * 使用场景：生产脚本尚未触发配置弹窗时，测试仍能读取 runtime 的稳定结果结构。
- * 入参为 node:test 上下文；无返回值。运行或断言异常由测试框架报告。
+ * 使用场景：用户只想查看现有配置但不保存。入参为 node:test 上下文；无返回值。
+ * 测试精确断言字段顺序、Key 安全输入属性、已标准化初始值和旧 JSON 不变。
  */
-test("App 配置场景暴露隔离的 Keychain 与 Alert 观测结果", async (t) => {
+test("App 操作菜单选择管理配置时预填安全表单且取消不保存", async (t) => {
+  const existingJson = runtimeConfigJson();
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 1 }, { index: -1 }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: existingJson },
+    runsInApp: true
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.equal(result.alerts[0].presentation, "sheet");
+  assert.deepEqual(result.alerts[1], {
+    actions: ["保存"],
+    cancelAction: "取消",
+    message: "配置将保存在 iOS Keychain 中",
+    presentation: "alert",
+    textFields: [
+      { placeholder: "高德 API Key", secure: true, value: "test-amap-key" },
+      {
+        placeholder: "TeslaMateApi 基础 URL",
+        value: "https://teslamate-api.example.test:65535"
+      },
+      { placeholder: "TeslaMate Web URL", value: "https://teslamate.example.test:1" }
+    ],
+    title: "管理配置"
+  });
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], existingJson);
+  assert.equal(result.webViews.length, 0);
+});
+
+/**
+ * 验证已配置 App 菜单取消后直接结束，不打开页面也不进入配置表单。
+ *
+ * 使用场景：用户误触运行脚本后关闭操作菜单。入参为 node:test 上下文；无返回值。
+ * 测试断言只展示一个 sheet、保留原始 Keychain JSON，并完成 Script 生命周期。
+ */
+test("App 操作菜单取消时不执行任何动作", async (t) => {
+  const existingJson = runtimeConfigJson();
+  const result = await runScriptableScript({
+    alertResponses: [{ index: -1 }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: existingJson },
+    runsInApp: true
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.equal(result.alerts.length, 1);
+  assert.equal(result.alerts[0].presentation, "sheet");
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], existingJson);
+  assert.equal(result.webViews.length, 0);
+  assert.equal(result.script.completed, true);
+});
+
+/**
+ * 验证 App 缺少有效配置时跳过操作菜单，直接展示空白配置表单。
+ *
+ * 使用场景：首次安装脚本或 Keychain 配置无法读取。入参为 node:test 上下文；无
+ * 返回值。测试以取消响应结束，借此断言首个交互是 alert 表单且没有产生写入。
+ */
+test("App 配置缺失时直接进入空白配置表单", async (t) => {
   const result = await runScriptableScript({
     alertResponses: [{ index: -1 }],
     keychainValues: {},
     runsInApp: true
   });
-  t.after(() => {
-    // 当前 App 路径未消费响应，仍需清理本次 runtime 的默认 documents 目录。
-    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
 
-  assert.deepEqual(result.alerts, []);
+  assert.equal(result.alerts.length, 1);
+  assert.equal(result.alerts[0].presentation, "alert");
+  assert.deepEqual(result.alerts[0].textFields, [
+    { placeholder: "高德 API Key", secure: true, value: "" },
+    { placeholder: "TeslaMateApi 基础 URL", value: "" },
+    { placeholder: "TeslaMate Web URL", value: "" }
+  ]);
   assert.deepEqual(result.keychain, {});
+});
+
+/**
+ * 验证合法表单输入保存为仅含 schema v1 标准字段的规范 JSON。
+ *
+ * 使用场景：首次配置时用户输入带首尾空白的 Key 和带尾斜杠的基础 URL。入参为
+ * node:test 上下文；无返回值。测试解析最终 Keychain 值并精确断言 trim 与 URL
+ * 标准化结果，同时确认成功提示需要独立 Alert 响应。
+ */
+test("App 配置表单合法保存时写入标准化 JSON 并显示成功提示", async (t) => {
+  const result = await runScriptableScript({
+    alertResponses: [
+      {
+        index: 0,
+        textFields: [
+          "  saved-amap-key  ",
+          "https://api.saved.example.test:8080///",
+          "http://web.saved.example.test///"
+        ]
+      },
+      { index: 0 }
+    ],
+    keychainValues: {},
+    runsInApp: true
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.deepEqual(JSON.parse(result.keychain[RUNTIME_CONFIG_KEY]), {
+    schemaVersion: 1,
+    amapApiKey: "saved-amap-key",
+    teslaMateApiBaseUrl: "https://api.saved.example.test:8080",
+    teslaMateWebUrl: "http://web.saved.example.test"
+  });
+  assert.deepEqual(result.alerts[1], {
+    actions: ["确定"],
+    cancelAction: null,
+    message: "配置已安全保存",
+    presentation: "alert",
+    textFields: [],
+    title: "保存成功"
+  });
+});
+
+/**
+ * 验证非法表单显示脱敏通用错误，并把本次输入保留到下一轮表单后允许重新保存。
+ *
+ * 使用场景：用户首次输入的 TeslaMateApi URL 不合法。入参为 node:test 上下文；无
+ * 返回值。测试断言错误提示不含任何敏感输入、重试表单完整保留原值，最终只保存
+ * 第二次合法输入的标准化结果。
+ */
+test("App 配置表单非法输入后显示通用错误并保留输入重试", async (t) => {
+  const sensitiveKey = "retry-secret-key";
+  const invalidApiUrl = "ftp://private-api.invalid/path";
+  const firstWebUrl = "https://private-web.example.test///";
+  const result = await runScriptableScript({
+    alertResponses: [
+      { index: 0, textFields: [sensitiveKey, invalidApiUrl, firstWebUrl] },
+      { index: 0 },
+      {
+        index: 0,
+        textFields: [
+          " final-key ",
+          "https://api.final.example.test///",
+          "https://web.final.example.test///"
+        ]
+      },
+      { index: 0 }
+    ],
+    keychainValues: {},
+    runsInApp: true
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.deepEqual(result.alerts[1], {
+    actions: ["确定"],
+    cancelAction: null,
+    message: "请检查所有配置项后重试",
+    presentation: "alert",
+    textFields: [],
+    title: "配置无效"
+  });
+  assert.deepEqual(result.alerts[2].textFields, [
+    { placeholder: "高德 API Key", secure: true, value: sensitiveKey },
+    { placeholder: "TeslaMateApi 基础 URL", value: invalidApiUrl },
+    { placeholder: "TeslaMate Web URL", value: firstWebUrl }
+  ]);
+  assert.equal(JSON.stringify(result.alerts).includes(sensitiveKey), true);
+  assert.equal(result.alerts[1].message.includes(sensitiveKey), false);
+  assert.equal(result.alerts[1].message.includes(invalidApiUrl), false);
+  assert.equal(result.logs.some((line) =>
+    line.includes(sensitiveKey) || line.includes(invalidApiUrl)
+  ), false);
+  assert.deepEqual(JSON.parse(result.keychain[RUNTIME_CONFIG_KEY]), {
+    schemaVersion: 1,
+    amapApiKey: "final-key",
+    teslaMateApiBaseUrl: "https://api.final.example.test",
+    teslaMateWebUrl: "https://web.final.example.test"
+  });
+});
+
+/**
+ * 验证配置表单取消不会创建 Keychain 配置，也不会额外展示消息。
+ *
+ * 使用场景：首次配置用户暂不保存。入参为 node:test 上下文；无返回值。测试断言
+ * 取消后仅保留一次表单交互，且脚本正常完成、WebView 未打开。
+ */
+test("App 配置表单取消时不写入 Keychain", async (t) => {
+  const result = await runScriptableScript({
+    alertResponses: [{ index: -1 }],
+    keychainValues: {},
+    runsInApp: true
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.equal(result.alerts.length, 1);
+  assert.deepEqual(result.keychain, {});
+  assert.equal(result.webViews.length, 0);
+  assert.equal(result.script.completed, true);
+});
+
+/**
+ * 验证 Keychain 写入异常显示脱敏失败提示，且原有配置 JSON 保持逐字不变。
+ *
+ * 使用场景：用户管理配置时 iOS Keychain 暂时不可写。入参为 node:test 上下文；无
+ * 返回值。测试给出新的敏感输入但注入 set 异常，随后比较旧值并检查提示与日志均
+ * 不包含新旧 Key 或私有 URL。
+ */
+test("App 配置表单写入失败时显示通用错误且不改变旧值", async (t) => {
+  const existingJson = runtimeConfigJson({ amapApiKey: "existing-secret-key" });
+  const newKey = "replacement-secret-key";
+  const newApiUrl = "https://replacement-api.example.test";
+  const result = await runScriptableScript({
+    alertResponses: [
+      { index: 1 },
+      {
+        index: 0,
+        textFields: [newKey, newApiUrl, "https://replacement-web.example.test"]
+      },
+      { index: 0 }
+    ],
+    keychainFailures: { set: true },
+    keychainValues: { [RUNTIME_CONFIG_KEY]: existingJson },
+    runsInApp: true
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], existingJson);
+  assert.deepEqual(result.alerts[2], {
+    actions: ["确定"],
+    cancelAction: null,
+    message: "无法保存配置，请稍后重试",
+    presentation: "alert",
+    textFields: [],
+    title: "保存失败"
+  });
+  assert.equal(result.alerts[2].message.includes(newKey), false);
+  assert.equal(result.alerts[2].message.includes(newApiUrl), false);
+  assert.equal(result.logs.some((line) =>
+    line.includes(newKey) || line.includes(newApiUrl) || line.includes("existing-secret-key")
+  ), false);
 });
 
 /**
