@@ -264,12 +264,35 @@ function serialize(value) {
   }));
 }
 
+/**
+ * 在隔离的 Node VM 中执行原始 Scriptable 脚本，并返回可供测试断言的运行快照。
+ *
+ * 使用场景：本项目的生产脚本依赖 iOS Scriptable 全局 API，无法直接在 Node 环境
+ * 运行；测试通过本方法提供受控的 API stub、网络响应、文件目录和用户交互编排，验证
+ * widget、缓存及配置流程的业务结果。入参 `options` 可覆盖脚本路径、documents
+ * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures` 和
+ * `alertResponses`；未传入的可选项使用测试安全的默认值。成功时返回 documents 路径、
+ * 请求/日志/Widget/WebView 快照，以及最终 Keychain 和 Alert 观测结果；返回值均不
+ * 持有内部可变集合。读取脚本、创建临时目录、VM 执行或被测脚本中的异常会原样向调用
+ * 方抛出，交互响应不足和 Keychain 故障也以固定错误供测试精确断言。
+ */
 async function runScriptableScript(options = {}) {
   const scriptPath = options.scriptPath || path.join(__dirname, "..", "Telsa Car.js");
   const source = fs.readFileSync(scriptPath, "utf8");
   const documentsDirectory = options.documentsDirectory || fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-docs-"));
   const requestLog = [];
   const logs = [];
+  /**
+   * 维护当前运行的用户交互状态和安全配置状态。
+   *
+   * 使用场景：配置向导测试既要模拟用户按顺序点击弹窗，也要在单个运行内读写敏感
+   * 配置。入参来自 `options.alertResponses`、`options.keychainValues` 和
+   * `options.keychainFailures`；`alerts` 与最终 Keychain 值会作为结果快照返回，
+   * `alertResponses` 仅供消费而不返回。响应仅在数组输入时逐项克隆，否则按空队列
+   * 处理：这是为了让缺失编排在 Alert 展示时抛出固定错误，而不是静默选取动作。
+   * Keychain 失败标记被规整为完整的四个布尔字段，保证未声明的操作不会意外失败；
+   * 克隆初始值避免被测脚本修改调用方传入的配置对象。
+   */
   const alerts = [];
   const alertResponses = Array.isArray(options.alertResponses)
     ? options.alertResponses.map((response) => clone(response))
@@ -297,7 +320,14 @@ async function runScriptableScript(options = {}) {
    * 抛出固定错误，调用方应自行处理该异常。
    */
   function throwKeychainFailure(operation) {
-    // 每种操作独立注入失败，保证测试能精确覆盖不同的安全存储异常分支。
+    /**
+     * 判断当前 Keychain 调用是否命中故障注入。
+     *
+     * 使用场景：通过单独开启 `contains`、`get`、`set` 或 `remove`，复现安全存储
+     * 在对应 API 调用处失败的业务分支。入参为经过内部调用限定的操作名；无正常
+     * 返回值。只有对应布尔标记为 true 才进入异常分支并抛出固定错误，false 或未配置
+     * 时直接返回，让实际的内存存储操作继续执行；固定错误文本用于测试精确匹配。
+     */
     if (keychainFailures[operation]) {
       throw new Error(`Mock Keychain ${operation} failed`);
     }
@@ -323,7 +353,14 @@ async function runScriptableScript(options = {}) {
      */
     get(key) {
       throwKeychainFailure("get");
-      // 与真实安全存储一样，缺失值不是空字符串，调用方必须显式处理该异常。
+      /**
+       * 区分“键不存在”与“键已保存但值为假值”。
+       *
+       * 使用场景：配置初始化要能可靠识别未保存的配置，不能把空字符串、0 或 false
+       * 误判为缺失。入参为请求读取的键名；键存在时本方法随后返回原始存储值，键不
+       * 存在时没有正常出参并抛出 `Missing keychain value`。此处使用 `Object.hasOwn`
+       * 而不是值的真值判断，分支依据是 Keychain 的存在性而非配置内容。
+       */
       if (!Object.hasOwn(keychainValues, key)) {
         throw new Error("Missing keychain value");
       }
@@ -448,11 +485,27 @@ async function runScriptableScript(options = {}) {
      * 不存在的默认动作。
      */
     async present(presentation) {
-      // 不允许没有测试编排的交互继续执行，否则会掩盖遗漏的配置向导分支。
+      /**
+       * 拒绝没有测试编排的弹窗展示。
+       *
+       * 使用场景：每个 Alert/Sheet 展示都代表一次需要测试明确选择的用户交互；入参
+       * 是调用开始时的剩余 `alertResponses` 队列。队列为空时没有正常动作下标或文本
+       * 字段出参，必须抛出 `Missing alert response`；队列非空时才消费一个响应并继续
+       * 记录展示快照。以队列长度作为分支依据可防止新增提示框后测试静默走默认路径。
+       */
       if (alertResponses.length === 0) {
         throw new Error("Missing alert response");
       }
 
+      /**
+       * 消费恰好一个响应并规范化为可安全读取字段的对象。
+       *
+       * 使用场景：弹窗展示成功后，`textFieldValue()` 和动作下标都要读取同一份当前
+       * 响应。入参为队首响应，可为测试传入的任意 JSON 值；出参写入 `this.response`
+       * 并随后写入 Alert 快照。响应是对象时保留其 `index` 与 `textFields`，否则使用
+       * 空对象：分支依据是只有对象可承载字段，非对象不应导致 stub 的属性访问异常，
+       * 但仍已被严格消费，最终会按取消语义返回 -1。
+       */
       const response = alertResponses.shift();
       this.response = response && typeof response === "object" ? response : {};
       alerts.push({
