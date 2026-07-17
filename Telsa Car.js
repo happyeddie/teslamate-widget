@@ -361,29 +361,37 @@ function renderMissingConfigWidget(widgetFamily) {
  * 使用已验证的 TeslaMate Web 地址打开车辆页面并隐藏其他车辆卡片。
  *
  * 使用场景：配置有效且 Scriptable 在 App 内运行。入参为标准化 runtimeConfig 和
- * 当前 carId；无返回值。WebView 加载或脚本执行异常原样抛出，URL 与车辆 ID 均只从
- * 显式参数读取，不依赖可变全局配置。
+ * 当前 carId；成功时等待 WebView 被关闭后才返回。WebView 创建、加载、脚本注入或
+ * 展示任一步失败时记录固定分类日志，并抛出固定 `Error("TeslaMate 页面打开失败")`；
+ * 原始异常和 URL 均不会离开本方法，避免私有 Web 地址出现在 Scriptable 错误界面。
  */
 async function openTeslaMateWebView(runtimeConfig, carId) {
-  
-  let wv = new WebView();
-  await wv.loadURL(runtimeConfig.teslaMateWebUrl);
-  
-  // TeslaMate 页面当前按 1 到 4 号车辆卡片组织；逐项注入样式，仅保留当前车辆。
-  for (var i = 1; i < 5; i++) {
-    // 只隐藏非当前车辆卡片；分支依据是循环车辆编号与显式 carId 是否不同。
-    if (i != carId) {
-      await wv.evaluateJavaScript(`
-        (() => {
-          const style = document.createElement('style');
-          style.textContent = '#car_${i}, div.navbar-brand, footer {display: none}';
-          document.head.appendChild(style);
-        })()
-      `)
+  try {
+    const wv = new WebView();
+    await wv.loadURL(runtimeConfig.teslaMateWebUrl);
+
+    // TeslaMate 页面当前按 1 到 4 号车辆卡片组织；逐项注入样式，仅保留当前车辆。
+    for (var i = 1; i < 5; i++) {
+      // 只隐藏非当前车辆卡片；分支依据是循环车辆编号与显式 carId 是否不同。
+      if (i != carId) {
+        await wv.evaluateJavaScript(`
+          (() => {
+            const style = document.createElement('style');
+            style.textContent = '#car_${i}, div.navbar-brand, footer {display: none}';
+            document.head.appendChild(style);
+          })()
+        `);
+      }
     }
+
+    // present 的 Promise 在页面关闭后才完成；必须等待它再允许 main 调用 Script.complete。
+    await wv.present();
   }
-  
-  wv.present(); 
+  catch (error) {
+    // WebView 异常可能携带加载 URL、注入脚本或系统上下文，只保留固定故障分类。
+    console.log("TeslaMate 页面打开失败");
+    throw new Error("TeslaMate 页面打开失败");
+  }
 }
 
 /**
@@ -423,27 +431,27 @@ async function presentAppMenu(runtimeConfig, carId) {
  */
 async function renderAccessoryWidget(runtimeContext, runtimeConfig, carId) {
   const { fm, fileRoot, widget } = runtimeContext;
-  
+
   let filename = `car_data_${carId}.json`;
   let file = fm.joinPath(fileRoot, filename);
 
   const data = await loadCarDataWithCache(runtimeContext, runtimeConfig, carId, file);
-  
+
   const car = data.data.status;
-  
+
   // 在独立绘图上下文中绘制电量环和状态图标，再作为单张图片写入锁屏 Widget。
-  {  
+  {
     let circle = new DrawContext();
     circle.size = new Size(100, 100);
     circle.opaque = false;
-      
+
     circle.setStrokeColor(Color.black());
     circle.setLineWidth(10);
     circle.strokeEllipse(new Rect(5, 5, 90, 90));
-      
+
     let power = car.battery_details.battery_level;
     circle.setFillColor(Color.white())
-      
+
     let width = 8;
     // 电量百分比按 360 度线性换算弧长，每度绘制一个圆点形成连续进度环。
     for (let angle = 0; angle <= 360 / 100 * power; angle += 1) {
@@ -451,8 +459,8 @@ async function renderAccessoryWidget(runtimeContext, runtimeConfig, carId) {
       let rect = new Rect(loc[0] - width/2, loc[1] - width/2, width, width);
       circle.fillEllipse(rect);
     }
-      
-      
+
+
     circle.setTextColor(Color.white())
     circle.setFont(Font.regularMonospacedSystemFont(12))
     let iconData = Data.fromBase64String("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");
@@ -460,15 +468,15 @@ async function renderAccessoryWidget(runtimeContext, runtimeConfig, carId) {
     if (car.state === "charging") {
       iconData = Data.fromBase64String("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");
     }
-    
+
     circle.drawImageAtPoint(Image.fromData(iconData), new Point(30, 34))
 
     let image = widget.addImage(circle.getImage(iconData));
     image.borderWidth=0;
   }
-    
-  
-    
+
+
+
   Script.setWidget(widget)
   widget.presentSmall()
   Script.complete();
@@ -544,7 +552,8 @@ async function getCarData(runtimeConfig, carId) {
  *
  * 使用场景：中号和锁屏 Widget 共用离线回退策略。入参为 runtimeContext、标准化
  * runtimeConfig、carId 和缓存文件绝对路径；成功返回 TeslaMateApi 响应对象。网络
- * 异常且缓存不存在时重抛原异常，缓存读取或 JSON 解析异常原样抛出。
+ * 异常且缓存不存在时抛出固定脱敏错误，确保保留“无法取得车辆数据”的失败语义但不
+ * 暴露 Request 可能携带的完整 API URL；缓存读取或 JSON 解析异常仍遵循其原有异常语义。
  */
 async function loadCarDataWithCache(runtimeContext, runtimeConfig, carId, file) {
   const { fm } = runtimeContext;
@@ -552,18 +561,27 @@ async function loadCarDataWithCache(runtimeContext, runtimeConfig, carId, file) 
     return await getCarData(runtimeConfig, carId);
   }
   catch (error) {
-    // Request 异常可能携带完整私有 URL，只记录固定分类并保留 error 供下方控制流重抛。
+    // Request 异常可能携带完整私有 URL，只记录固定分类，绝不输出或继续传播该对象。
     console.log("车辆状态请求失败，尝试读取缓存");
-    // 只有已有缓存时才能离线回退；不存在缓存时保留原始请求失败语义。
+    // 只有已有缓存时才能离线回退；不存在缓存时保留失败语义但转换为固定脱敏 Error。
     if (!fm.fileExists(file)) {
-      throw error;
+      throw new Error("车辆状态加载失败");
     }
     const json = await fm.readString(file);
     return JSON.parse(json);
   }
 }
 
+/**
+ * 判断车辆是否相对上次成功缓存的位置发生移动。
+ *
+ * 使用场景：地理编码和静态地图缓存需要决定是否重新请求位置相关数据。入参 `car`
+ * 必须包含当前 `car_geodata`，可选 `prev_geodata`；返回 true 表示无历史坐标或任一
+ * 经纬度不同，返回 false 表示可复用位置缓存。该方法不进行浮点容差计算：TeslaMate
+ * 返回值变化即视为位置更新；缺少当前坐标时由调用链的数据契约异常处理，方法不吞错。
+ */
 function hasCarMoved(car) {
+  // 首次没有历史坐标必须刷新，随后分别比较纬度和经度以避免只沿单一方向移动被遗漏。
   return !car.prev_geodata ||
     car.car_geodata.latitude !== car.prev_geodata.latitude ||
     car.car_geodata.longitude !== car.prev_geodata.longitude;
@@ -581,30 +599,30 @@ async function getCarGeo(runtimeContext, runtimeConfig, carId, car, lat, lng) {
   let geo = wgs2gcj(lat, lng)
   let filename = "";
   let file = null;
-  
+
   let json;
   filename = `car_map_${carId}.json`;
   file = fm.joinPath(fileRoot, filename);
-  
+
   // 已有地理文字缓存时先读取，车辆未移动即可复用并跳过定位服务。
   if (fm.fileExists(file)) {
     json = await fm.readString(file);
     json = JSON.parse(json);
     console.log("Read Geo From Disk");
   }
-  
+
   // 没有文字缓存或车辆坐标变化时重新反向地理编码，避免展示过期位置。
   if (json == null || hasCarMoved(car)) {
     // 地址文字优先使用 iOS reverseGeocode；高德 Key 仅用于下方静态地图请求。
     //let req = await new Request(url);
     //json = await req.loadString();
-    
+
     try {
       let location = await Location.reverseGeocode(geo.latitude, geo.longitude, "zh-CN");
       json = JSON.stringify(location);
-      
+
       //console.log(json)
-      
+
       fm.writeString(file, json);
       json = JSON.parse(json);
       console.log("Write Geo To Disk");
@@ -617,18 +635,18 @@ async function getCarGeo(runtimeContext, runtimeConfig, carId, car, lat, lng) {
       }
     }
   }
-	
+
   let image;
   let zoom = car.state === "driving" ? 14 : 14;
   filename = `car_map_${carId}.png`;
-  file = fm.joinPath(fileRoot, filename);    
-	
+  file = fm.joinPath(fileRoot, filename);
+
   // 已有地图图片缓存时先加载；车辆未移动时后续可直接复用。
   if (fm.fileExists(file)){
     image = await fm.readImage(file);
     console.log("Read Map From Disk");
   }
-  
+
 
   // 缓存缺失或车辆移动时才请求新静态地图，降低高德接口调用频率。
   if (image == null || hasCarMoved(car)) {
@@ -673,9 +691,17 @@ async function getCarGeo(runtimeContext, runtimeConfig, carId, car, lat, lng) {
   };
 }
 
+/**
+ * 依据航向角计算地图箭头顶点在画布中的坐标。
+ *
+ * 使用场景：renderMap 以同一规则绘制白色外层和蓝色内层的四边箭头。入参 `length` 是
+ * 从中心到顶点的长度，`angle` 是以正上方为零点的角度，`size` 是中心坐标；返回包含
+ * 整数 `[x, y]` 的数组。方法通过正弦定理把极坐标投影到 Scriptable 画布坐标系，结果
+ * 四舍五入以避免子像素模糊；数学输入异常（如 NaN）按 JavaScript 原始计算结果传播，
+ * 因为航向由上游 TeslaMate 数据契约保证。
+ */
 function calculateSidesLength(length, angle, size) {
-      
-    // 角度转换为弧度
+    // 先将角度换算为弧度；画布 y 轴向下，因此使用 90 度补角匹配顶部为零点的航向定义。
     var angleA = 90;
     var angleB = 90 - angle;
     var angleC = angle;
@@ -686,7 +712,7 @@ function calculateSidesLength(length, angle, size) {
     // 使用正弦定理计算其他两边的长度
     var y = length * Math.sin(angleB) / Math.sin(angleA);
     var x = length * Math.sin(angleC) / Math.sin(angleA);
-    
+
     return [size + parseInt(x.toFixed(0)), size - parseInt(y.toFixed(0))];
 }
 
@@ -699,15 +725,15 @@ function calculateSidesLength(length, angle, size) {
  */
 async function loadCarContext(runtimeContext, runtimeConfig, carId) {
   const { fm, fileRoot, widget } = runtimeContext;
-  
+
   // load pre data
   let filename = `car_data_${carId}.json`;
   let file = fm.joinPath(fileRoot, filename);
 
   const data = await loadCarDataWithCache(runtimeContext, runtimeConfig, carId, file);
-  
+
   const car = data.data.status;
-  
+
   // 已有车辆缓存时读取上一坐标，用于判断地图和地理信息是否需要刷新。
   if (fm.fileExists(file)) {
     try {
@@ -739,7 +765,7 @@ async function loadCarContext(runtimeContext, runtimeConfig, carId) {
   else {
     widget.refreshAfterDate = new Date(Date.now() + 1000 * 60);
   }
-  
+
   let geo = await getCarGeo(
     runtimeContext,
     runtimeConfig,
@@ -768,7 +794,16 @@ const { widget } = runtimeContext;
 widget.backgroundColor = new Color("#292929", 100);
 const car = await loadCarContext(runtimeContext, runtimeConfig, carId);
 
-// Widget UI
+  // Widget UI
+  /**
+   * 创建中号 Widget 的左右两栏基础布局。
+   *
+   * 使用场景：车辆数据准备完成后，所有左侧状态区与右侧地图区共用这一固定容器。入参
+   * `widget` 为尚未提交的 ListWidget；返回 `{ left, right }` 两个纵向 Stack，左侧宽
+   * 190、高 176 并保留信息区内边距，右侧使用 176×176 地图面板。此方法只创建布局，
+   * 不读取车辆数据、不发起请求；Scriptable Stack 创建异常原样传播。两栏间距固定为
+   * 10，分支不存在，以确保中号尺寸下信息与地图不会相互挤压。
+   */
 function createMediumLayout(widget) {
 let layout = widget.addStack();
 layout.layoutVertically();
@@ -804,12 +839,12 @@ const { left, right } = createMediumLayout(widget);
  * 车辆名称链接只使用显式配置的 TeslaMate Web URL。
  */
 function renderCarInfo(left, car, runtimeConfig) {
-  
+
   let stack = left.addStack()
   stack.centerAlignContent();
   stack.setPadding(0, 0, 0, 0);
   stack.size = new Size(150, 20)
-  
+
   // Car Name
   {
     let text = stack.addText(car.display_name + '                  ')
@@ -817,9 +852,9 @@ function renderCarInfo(left, car, runtimeConfig) {
     text.lineLimit = 1;
     text.url=runtimeConfig.teslaMateWebUrl
   }
-  
+
   stack.addSpacer(3)
-  
+
   // update available
   {
     // 仅当 TeslaMate 明确标记有可用更新时显示礼物图标，false 时保持首行紧凑。
@@ -829,18 +864,18 @@ function renderCarInfo(left, car, runtimeConfig) {
       img.imageSize = new Size(18, 18);
     }
   }
-  
+
   // Car State
   {
     //car.state = "suspended";
-    
+
     // Tire
-    {  
+    {
       // 任一胎压低于 2.45 时展示黄色告警；无胎压数据时跳过，避免访问缺失字段。
       if (car.tpms_details && (
-        car.tpms_details.tpms_pressure_rl < 2.45 || 
-        car.tpms_details.tpms_pressure_fl < 2.45 || 
-        car.tpms_details.tpms_pressure_rr < 2.45 || 
+        car.tpms_details.tpms_pressure_rl < 2.45 ||
+        car.tpms_details.tpms_pressure_fl < 2.45 ||
+        car.tpms_details.tpms_pressure_rr < 2.45 ||
         car.tpms_details.tpms_pressure_fr < 2.45
       )) {
         let symbol = SFSymbol.named("exclamationmark.tirepressure");
@@ -849,11 +884,11 @@ function renderCarInfo(left, car, runtimeConfig) {
         img.imageSize = new Size(16, 16);
       }
     }
-    
+
     stack.addSpacer(5)
     let symbol = null
     let color = Color.white();
-    
+
     // 根据 TeslaMate 状态选择图标和颜色；未知状态保留 null 供下方回退为原始文字。
     switch (car.state) {
       case "asleep": {
@@ -895,14 +930,14 @@ function renderCarInfo(left, car, runtimeConfig) {
         console.log(car.state)
       }
     }
-    
+
     // Sentry Mode
     // 哨兵模式的红色录制图标优先于普通车辆状态，突出当前安全监控状态。
     if (car.car_status.sentry_mode === true) {
       symbol = SFSymbol.named("record.circle");
       color = Color.red()
     }
-    
+
     // 未识别状态没有匹配图标时显示原始状态文本，否则渲染选定的 SF Symbol。
     if (symbol === null) {
       let text = stack.addText(car.state);
@@ -912,9 +947,9 @@ function renderCarInfo(left, car, runtimeConfig) {
       img.tintColor = color;
       img.imageSize = new Size(18, 18);
     }
-    
+
   }
-  
+
   stack.addSpacer(4)
   // 只有行驶状态展示实时速度，其他状态不占用首行空间。
   if (car.state === "driving") {
@@ -922,24 +957,32 @@ function renderCarInfo(left, car, runtimeConfig) {
     text.font = Font.mediumSystemFont(12)
     text.textColor = Color.green();
   }
- 
+
 
 }
 
 renderCarInfo(left, car, runtimeConfig);
 
-// Battery Info
+  /**
+   * 渲染电池图、额定续航和相对刷新时间。
+   *
+   * 使用场景：中号 Widget 左侧在车辆概览行后展示电量核心信息。入参 `left` 为布局
+   * 左栏 Stack，`car` 为含 `battery_details` 与 `charging_details` 的车辆状态；无返回
+   * 值，直接向 Stack 追加元素。电池外壳颜色按是否充电区分；黑色区域表示充电上限以
+   * 上不可用部分，浅色/黄色区域表示当前电量到上限的差值，计算比例以 40 像素有效宽
+   * 度换算。字段不满足 TeslaMate 数据契约时保留原有 Scriptable 异常语义。
+   */
 function renderBatteryInfo(left, car) {
-  
+
   left.addSpacer(15)
-  
+
   let stack = left.addStack();
   stack.centerAlignContent();
-  
+
   let height = 14;
-  
+
   {
-    
+
     let battery = new DrawContext();
     {
       battery.opaque = false;
@@ -951,11 +994,11 @@ function renderBatteryInfo(left, car) {
       battery.setFillColor(car.state === "charging" ? Color.green() : Color.white());
       battery.fillPath();
     }
-    
+
     {
-      
+
       let width = (100 - car.charging_details.charge_limit_soc) / 100 * 40;
-      
+
       let draw = new DrawContext();
       draw.opaque = false;
       draw.size = new Size(42, height - 2);
@@ -964,15 +1007,15 @@ function renderBatteryInfo(left, car) {
       draw.addPath(path)
       draw.setFillColor(Color.black());
       draw.fillPath();
-      
+
       battery.drawImageAtPoint(draw.getImage(), new Point(41 - width, 1));
     }
-    
+
     {
-      
+
       let width = (car.charging_details.charge_limit_soc - car.battery_details.battery_level) / 100 * 40;
       let x = car.battery_details.battery_level / 100 * 40 + 1;
-      
+
       let draw = new DrawContext();
       draw.opaque = false;
       draw.size = new Size(42, height - 2);
@@ -981,20 +1024,20 @@ function renderBatteryInfo(left, car) {
       draw.addPath(path)
       draw.setFillColor(car.state === "charging" ? Color.yellow() : Color.lightGray());
       draw.fillPath();
-      
+
       battery.drawImageAtPoint(draw.getImage(), new Point(x, 1));
       battery.setFont(Font.mediumSystemFont(11))
       battery.setTextAlignedCenter();
       battery.setTextColor(car.state === "charging" ? Color.white() : Color.black());
-      
+
       battery.drawText(`${car.battery_details.battery_level}`, new Point(14, 0))
-      
+
     }
-    
+
     let image = stack.addImage(battery.getImage())
     image.imageSize = new Size(50, height)
   }
-  
+
   {
     stack.addSpacer(5);
     stack.centerAlignContent();
@@ -1004,7 +1047,7 @@ function renderBatteryInfo(left, car) {
     text.font = Font.mediumSystemFont(12)
     text.leftAlignText();
   }
-  
+
   {
     let time = stack.addDate(new Date());
     time.size = new Size(30, 20)
@@ -1015,13 +1058,21 @@ function renderBatteryInfo(left, car) {
     time.textColor = Color.gray();
     time.rightAlignText();
   }
-  
+
 }
 
 renderBatteryInfo(left, car);
 
-// Charging Status
+  /**
+   * 仅在充电中展示功率、目标电量与预计剩余时间。
+   *
+   * 使用场景：中号 Widget 的电池信息下方补充充电过程数据。入参 `left` 为左栏 Stack，
+   * `car` 为 TeslaMate 车辆状态；无返回值。只有 `car.state === "charging"` 时追加一
+   * 行，其他状态不占用布局空间；剩余小时数先换算成整数分钟，再拆为小时和分钟，以
+   * 避免浮点小时直接展示。充电字段缺失时沿用既有数据契约异常，不在此处猜测默认值。
+   */
 function renderChargingStatus(left, car) {
+  // 非充电状态不显示空白占位；分支依据是该行只对实时充电过程有业务意义。
   if (car.state === "charging") {
 
     let time = Math.floor(car.charging_details.time_to_full_charge * 60);
@@ -1034,7 +1085,7 @@ function renderChargingStatus(left, car) {
     if (min > 0) {
       timeText = timeText + `${min}m`;
     }
-    
+
     left.addSpacer(8)
     let line1 = left.addText(` ${car.charging_details.charger_power}kW → ${car.charging_details.charge_limit_soc}% · ${timeText}         `)
     line1.lineLimit = 1;
@@ -1046,19 +1097,27 @@ function renderChargingStatus(left, car) {
 
 renderChargingStatus(left, car);
 
-// Car Status
+  /**
+   * 渲染锁定、乘员、车窗、空调和车门五项状态图标。
+   *
+   * 使用场景：中号 Widget 左侧用紧凑图标概览车辆控制状态。入参 `left` 为左栏 Stack，
+   * `car` 需包含 `car_status` 与 `climate_details`；无返回值。锁定状态使用锁/开锁图标，
+   * 其余四项按布尔值选择白色（开启/有人）或灰色（关闭/无人）；该视觉规则让异常状态
+   * 比默认静止状态更醒目。字段缺失时保留原始数据契约异常语义。
+   */
 function renderCarStatus(left, car) {
   left.addSpacer(15)
-  
+
   let stack = left.addStack();
-  
+
   let iconSize = new Size(20, 16);
   let spacerSize = 12;
-  
+
   // Lock State
   {
     let symbol = null
-    
+
+    // 锁定为 true 时显示闭锁，其他值统一按未锁处理，避免不确定状态被误标为安全。
     switch (car.car_status.locked) {
       case true: {
         symbol = SFSymbol.named("lock.fill");
@@ -1068,14 +1127,14 @@ function renderCarStatus(left, car) {
         symbol = SFSymbol.named("lock.open.fill");
       }
     }
-    
+
     let img = stack.addImage(symbol.image);
     img.tintColor = Color.white()
     img.imageSize = iconSize;
     img.rightAlignImage();
     stack.addSpacer(spacerSize);
   }
-  
+
   {
     let symbol = SFSymbol.named("person.fill");
     let img = stack.addImage(symbol.image);
@@ -1083,7 +1142,7 @@ function renderCarStatus(left, car) {
     img.tintColor = car.car_status.is_user_present === true ? Color.white() : Color.gray();
     stack.addSpacer(spacerSize);
   }
-  
+
   {
     let symbol = SFSymbol.named("car.window.right");
     let img = stack.addImage(symbol.image);
@@ -1092,15 +1151,15 @@ function renderCarStatus(left, car) {
     //img.url = "scriptable:///run?scriptName=" + encodeURIComponent(Script.name()) + '&ctrl=' + (car.car_status.windows_open === true ? 'window_close' : 'window_open');
     stack.addSpacer(spacerSize);
   }
-  
+
   {
     let symbol = SFSymbol.named("fan.fill");
     let img = stack.addImage(symbol.image);
     img.imageSize = iconSize;
     img.tintColor = car.climate_details.is_climate_on === true ? Color.white() : Color.gray();
-    stack.addSpacer(spacerSize); 
+    stack.addSpacer(spacerSize);
   }
-  
+
   {
     let symbol = SFSymbol.named("car.top.door.front.left.and.front.right.and.rear.left.and.rear.right.open.fill");
     let img = stack.addImage(symbol.image);
@@ -1111,22 +1170,30 @@ function renderCarStatus(left, car) {
 
 renderCarStatus(left, car);
 
-// Location Info
+  /**
+   * 渲染车辆状态时间与地理编码得到的位置名称。
+   *
+   * 使用场景：中号 Widget 左侧底部提供数据新鲜度和停车位置摘要。入参 `left` 为左栏
+   * Stack，`car` 需包含 ISO 时间 `state_since` 和 `car_geo.geofence`；无返回值。状态时
+   * 间距当前不足一分钟显示秒、不足一小时显示分钟、其余显示小时，避免长时间戳挤占
+   * 布局；无效日期按既有 Date 行为进入小时分支，不在展示层记录或抛出敏感信息。
+   */
 function renderLocationInfo(left, car) {
-  
+
   left.addSpacer(15)
- 
-  
+
+
   // Data Time
   {
-    
+
     let stack = left.addStack();
-    
+
     let text = stack.addText("")
-  
+
     let desc = "long long ago"
     let time = new Date(car.state_since);
     let sec = Math.floor((new Date().getTime() - time.getTime()) / 1000);
+    // 依时间差选择最短可读单位；分支顺序从细到粗，确保 59 秒不会被提前格式化为 0 分钟。
     if (sec < 60) {
       desc = sec + 's';
     }
@@ -1143,38 +1210,46 @@ function renderLocationInfo(left, car) {
     text.lineLimit = 2;
     //text.url = `http://maps.apple.com/?ll=${car.car_geo.latitude},${car.car_geo.longitude}&q=` + encodeURI(car.display_name);
   }
-  
-  
+
+
 }
 
 renderLocationInfo(left, car);
 
 
-// Map
+  /**
+   * 渲染静态地图、车辆航向箭头及 Apple Maps 跳转链接。
+   *
+   * 使用场景：中号 Widget 右栏展示 getCarGeo 已准备的地图图片。入参 `right` 为右栏
+   * Stack，`car` 需包含 `car_geo.image`、坐标及 `driving_details.heading`；无返回值。先
+   * 在 300×300 画布合成地图和箭头，再缩放到 176×176 面板；箭头四个顶点根据航向角
+   * 计算，外层白色描边与内层蓝色填充提高任何地图底色上的可见度。图片或坐标缺失时
+   * 保留上游数据契约异常语义；链接仅包含运行时车辆坐标，不写入日志或持久配置。
+   */
 function renderMap(right, car) {
   let stack = right.addStack();
   stack.setPadding(0, 0, 0, 0)
   stack.size = new Size(MAP_PANEL_SIZE, MEDIUM_WIDGET_HEIGHT)
   {
-    
+
     let map = new DrawContext();
     map.opaque = false;
     map.size = new Size(300, 300);
     map.drawImageAtPoint(car.car_geo.image, new Point(0, 0))
-    
+
     let angle = car.driving_details.heading;
     let arrow = new DrawContext();
     arrow.size = new Size(40, 40);
     arrow.opaque = false;
     let size = 16;
-    
+
     {
       let path = new Path();
       path.addLines([
-        new Point(calculateSidesLength(20, angle, size)[0], calculateSidesLength(20, angle, size)[1]), 
-        new Point(calculateSidesLength(20, angle + 130, size)[0], calculateSidesLength(20, angle + 130, size)[1]), 
-        new Point(calculateSidesLength(8, angle + 180, size)[0], calculateSidesLength(8, angle + 180, size)[1]),      
-        new Point(calculateSidesLength(20, angle - 130, size)[0], calculateSidesLength(20, angle - 130, size)[1]), 
+        new Point(calculateSidesLength(20, angle, size)[0], calculateSidesLength(20, angle, size)[1]),
+        new Point(calculateSidesLength(20, angle + 130, size)[0], calculateSidesLength(20, angle + 130, size)[1]),
+        new Point(calculateSidesLength(8, angle + 180, size)[0], calculateSidesLength(8, angle + 180, size)[1]),
+        new Point(calculateSidesLength(20, angle - 130, size)[0], calculateSidesLength(20, angle - 130, size)[1]),
       ]);
       arrow.addPath(path)
       arrow.setFillColor(Color.white());
@@ -1184,18 +1259,18 @@ function renderMap(right, car) {
     {
       let path = new Path();
       path.addLines([
-        new Point(calculateSidesLength(14, angle, size)[0], calculateSidesLength(14, angle, size)[1]), 
-        new Point(calculateSidesLength(14, angle + 130, size)[0], calculateSidesLength(14, angle + 130, size)[1]), 
-        new Point(calculateSidesLength(4, angle + 180, size)[0], calculateSidesLength(4, angle + 180, size)[1]),      
-        new Point(calculateSidesLength(14, angle - 130, size)[0], calculateSidesLength(14, angle - 130, size)[1]), 
+        new Point(calculateSidesLength(14, angle, size)[0], calculateSidesLength(14, angle, size)[1]),
+        new Point(calculateSidesLength(14, angle + 130, size)[0], calculateSidesLength(14, angle + 130, size)[1]),
+        new Point(calculateSidesLength(4, angle + 180, size)[0], calculateSidesLength(4, angle + 180, size)[1]),
+        new Point(calculateSidesLength(14, angle - 130, size)[0], calculateSidesLength(14, angle - 130, size)[1]),
       ]);
       arrow.addPath(path)
       arrow.setFillColor(Color.blue());
       arrow.fillPath();
     }
-    
+
     map.drawImageAtPoint(arrow.getImage(), new Point(130, 130))
-    
+
     let image = stack.addImage(map.getImage());
     image.rightAlignImage();
     image.imageSize = new Size(MAP_PANEL_SIZE, MEDIUM_WIDGET_HEIGHT);
@@ -1203,7 +1278,7 @@ function renderMap(right, car) {
     image.cornerRadius = 0;
     image.url = `http://maps.apple.com/?ll=${car.car_geo.latitude},${car.car_geo.longitude}&q=` + encodeURI(car.display_name);
   }
-    
+
 }
 
 renderMap(right, car);

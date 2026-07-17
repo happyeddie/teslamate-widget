@@ -84,8 +84,6 @@ Keychain 属于设备侧安全存储。不同设备或重新安装、迁移 Scri
 
 车辆 ID 不属于安全配置，继续从 `args.widgetParameter` 中读取；未提供有效数字时默认使用 `1`。支持示例：
 
-`args.widgetParameter` 支持示例：
-
 - `1`：使用车辆 ID 1。
 - `dark,1`：保留 dark 标记，同时使用车辆 ID 1。
 - `1,dark`：同上。

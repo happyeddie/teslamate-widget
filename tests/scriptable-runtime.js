@@ -242,18 +242,52 @@ class WebView {
 
   async evaluateJavaScript(source) {
     this.evaluatedJavaScript.push(source);
+    WebView.throwConfiguredFailure("evaluate");
     return null;
   }
 
   async loadURL(url) {
     this.loadedURL = url;
+    WebView.throwConfiguredFailure("load");
   }
 
-  present() {
+  /**
+   * 模拟 Scriptable WebView 的异步展示与关闭生命周期。
+   *
+   * 使用场景：生产脚本必须等待 `present()` 完成后才能调用 `Script.complete()`，否则
+   * App 页面可能尚未关闭就结束脚本。无入参，成功返回 Promise<void>；通过运行时配置
+   * 可在 load、evaluate 或 present 三阶段抛出自定义 Error。开始和完成事件写入独立
+   * 生命周期数组，供测试检查顺序；中间 `await` 是关键，它能让未 await 的生产代码
+   * 暴露出“Script.complete 早于展示完成”的回归。
+   */
+  async present() {
+    WebView.lifecycle.push("webview.present:start");
+    await Promise.resolve();
+    WebView.throwConfiguredFailure("present");
     this.presented = true;
+    WebView.lifecycle.push("webview.present:complete");
+  }
+
+  /**
+   * 按当前测试配置抛出 WebView 阶段故障。
+   *
+   * 使用场景：安全回归测试需要让加载、脚本注入和展示分别携带虚构的 URL/Key。入参
+   * `operation` 只能是 load、evaluate 或 present；无正常业务返回值。配置为 Error 时
+   * 原样抛出，其他真值抛固定 Mock Error，未配置时不产生副作用。
+   */
+  static throwConfiguredFailure(operation) {
+    const configuredFailure = WebView.failures[operation];
+    if (configuredFailure instanceof Error) {
+      throw configuredFailure;
+    }
+    if (configuredFailure) {
+      throw new Error(`Mock WebView ${operation} failed`);
+    }
   }
 }
 WebView.instances = [];
+WebView.failures = { load: false, evaluate: false, present: false };
+WebView.lifecycle = [];
 
 function serialize(value) {
   return JSON.parse(JSON.stringify(value, (key, item) => {
@@ -272,11 +306,12 @@ function serialize(value) {
  * widget、缓存及配置流程的业务结果。入参 `options` 可覆盖脚本路径、documents
  * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures`、
  * `failImages` 和 `alertResponses`；未传入的可选项使用测试安全的默认值。
- * `keychainFailures.<operation>` 与 `failImages` 可传布尔值或 Error：true 使用向后兼容
- * 的固定 Mock Error，Error 实例则原样抛出，供安全测试携带虚构敏感信息。成功时返回
- * documents 路径、请求/日志/Widget/WebView 快照，以及最终 Keychain 和 Alert 观测
- * 结果；返回值均不持有内部可变集合。读取脚本、创建临时目录、VM 执行或被测脚本中的
- * 异常会原样向调用方抛出，交互响应不足也使用固定错误供测试精确断言。
+ * `keychainFailures.<operation>`、`failImages` 与 `webViewFailures.<operation>` 可传布尔
+ * 值或 Error：true 使用向后兼容的固定 Mock Error，Error 实例则原样抛出，供安全测试
+ * 携带虚构敏感信息。成功时返回 documents 路径、请求/日志/Widget/WebView 快照、Keychain
+ * 写入的脱敏观测、生命周期以及最终 Keychain 和 Alert 观测；返回值均不持有内部可变集合。
+ * VM 异常会原样向调用方抛出，同时附加不含异常详情的 `runtimeResult` 快照，便于安全测试
+ * 断言错误期间的日志、Alert 与 Widget 输出；交互响应不足仍使用固定错误供测试精确断言。
  */
 async function runScriptableScript(options = {}) {
   const scriptPath = options.scriptPath || path.join(__dirname, "..", "Telsa Car.js");
@@ -284,6 +319,8 @@ async function runScriptableScript(options = {}) {
   const documentsDirectory = options.documentsDirectory || fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-docs-"));
   const requestLog = [];
   const logs = [];
+  const keychainSetCalls = [];
+  const lifecycle = [];
   /**
    * 维护当前运行的用户交互状态和安全配置状态。
    *
@@ -307,12 +344,19 @@ async function runScriptableScript(options = {}) {
     set: options.keychainFailures?.set || false,
     remove: options.keychainFailures?.remove || false
   };
+  const webViewFailures = {
+    load: options.webViewFailures?.load || false,
+    evaluate: options.webViewFailures?.evaluate || false,
+    present: options.webViewFailures?.present || false
+  };
   const scriptState = {
     completed: false,
     widget: null
   };
 
   WebView.instances = [];
+  WebView.failures = webViewFailures;
+  WebView.lifecycle = lifecycle;
 
   /**
    * 按测试选项注入 Keychain 操作失败。
@@ -383,6 +427,18 @@ async function runScriptableScript(options = {}) {
      * 注入开启时不写入并抛出固定测试错误。
      */
     set(key, value) {
+      /**
+       * 记录一次不包含配置内容的 Keychain.set 调用。
+       *
+       * 使用场景：配置表单必须把 schema v1 作为单个整体原子保存，测试需要验证调用
+       * 次数和目标键而不能回显 API Key 或 URL。入参为 Keychain.set 的原始键和值；仅
+       * 记录键和字符串长度，value 不是字符串时记录 null。记录发生在故障注入之前，
+       * 因此写入失败测试也能观察到真实尝试次数。
+       */
+      keychainSetCalls.push({
+        key,
+        valueLength: typeof value === "string" ? value.length : null
+      });
       throwKeychainFailure("set");
       keychainValues[key] = value;
     },
@@ -605,6 +661,8 @@ async function runScriptableScript(options = {}) {
     },
     Script: {
       complete: () => {
+        // 记录完成时机，供 WebView 生命周期测试验证 await present 后才结束脚本。
+        lifecycle.push("script.complete");
         scriptState.completed = true;
       },
       name: () => "Telsa Car",
@@ -617,25 +675,44 @@ async function runScriptableScript(options = {}) {
     encodeURI
   };
 
+  /**
+   * 构造不共享运行时内部集合的测试快照。
+   *
+   * 使用场景：成功执行直接返回，生产脚本抛错时附加到异常供脱敏断言复用。无入参；返回
+   * 请求、UI、Keychain、生命周期和脱敏写入观测。Keychain 写入值始终不在观测中返回，
+   * 只保留目标键与长度；完整最终 Keychain 仅保留既有测试兼容接口。
+   */
+  function createRuntimeResult() {
+    return {
+      alerts: clone(alerts),
+      documentsDirectory,
+      keychain: clone(keychainValues),
+      keychainSetCalls: clone(keychainSetCalls),
+      lifecycle: clone(lifecycle),
+      logs: clone(logs),
+      requests: requestLog.map((request) => ({
+        url: request.url,
+        method: request.method,
+        headers: request.headers,
+        timeoutInterval: request.timeoutInterval
+      })),
+      script: clone(scriptState),
+      webViews: WebView.instances.map((webView) => serialize(webView)),
+      widget: scriptState.widget ? serialize(scriptState.widget) : null
+    };
+  }
+
   const context = vm.createContext(sandbox);
   const wrapped = `(async () => {\n${source}\n})()`;
-  await new vm.Script(wrapped, { filename: scriptPath }).runInContext(context, { timeout: 5000 });
-
-  return {
-    alerts: clone(alerts),
-    documentsDirectory,
-    keychain: clone(keychainValues),
-    logs,
-    requests: requestLog.map((request) => ({
-      url: request.url,
-      method: request.method,
-      headers: request.headers,
-      timeoutInterval: request.timeoutInterval
-    })),
-    script: scriptState,
-    webViews: WebView.instances.map((webView) => serialize(webView)),
-    widget: scriptState.widget ? serialize(scriptState.widget) : null
-  };
+  try {
+    await new vm.Script(wrapped, { filename: scriptPath }).runInContext(context, { timeout: 5000 });
+    return createRuntimeResult();
+  }
+  catch (error) {
+    // 仅测试 runtime 附加观测快照；不修改生产脚本原始的固定脱敏 Error 文本。
+    error.runtimeResult = createRuntimeResult();
+    throw error;
+  }
 }
 
 function collectByType(node, type, result = []) {

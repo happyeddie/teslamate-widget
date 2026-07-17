@@ -122,6 +122,25 @@ function assertSensitiveValuesAbsent(result, sensitiveValues) {
 }
 
 /**
+ * 执行预期失败的 Scriptable 脚本，并取得 runtime 附加的脱敏快照。
+ *
+ * 使用场景：生产代码必须抛出固定错误，同时测试仍需检查失败前日志、Alert 和 Widget
+ * 没有回显异常中的虚构私密 URL 或 Key。入参为 `runScriptableScript` 的 options；返回
+ * 被捕获的 Error。脚本意外成功时立即触发断言失败；错误没有 `runtimeResult` 时同样失败，
+ * 因为这表示 runtime 无法支持安全回归测试所需的可观测性。
+ */
+async function captureRuntimeFailure(options) {
+  try {
+    await runScriptableScript(options);
+  }
+  catch (error) {
+    assert.ok(error.runtimeResult, "失败错误必须附带 runtime 脱敏快照");
+    return error;
+  }
+  assert.fail("预期 Scriptable 脚本抛出错误");
+}
+
+/**
  * 判断源码是否包含未通过词法声明引入的 carId 写操作。
  *
  * 使用场景：静态审计必须识别块内直接赋值、复合赋值、自增自减，以及
@@ -555,6 +574,69 @@ test("App 操作菜单选择打开 TeslaMate 时展示当前车辆 WebView", asy
 });
 
 /**
+ * 验证 WebView 关闭前不会结束 Scriptable 生命周期。
+ *
+ * 使用场景：Scriptable 的 `WebView.present()` 是异步操作；如果生产代码漏写 await，
+ * runtime 的微任务会让 `script.complete` 出现在展示完成前。入参为 node:test 上下文；
+ * 无返回值。测试通过严格生命周期顺序验证页面展示完成后才完成脚本。
+ */
+test("App 打开 TeslaMate 时等待 WebView 展示完成再结束脚本", async (t) => {
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+    runsInApp: true,
+    widgetParameter: "1"
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.deepEqual(result.lifecycle, [
+    "webview.present:start",
+    "webview.present:complete",
+    "script.complete"
+  ]);
+  assert.equal(result.script.completed, true);
+});
+
+/**
+ * 验证 WebView 各阶段失败都会转换为固定脱敏错误。
+ *
+ * 使用场景：页面加载、样式注入和展示关闭都可能抛出带私有 Web 地址或 API Key 的系统
+ * Error。入参为 node:test 上下文；无返回值。每个阶段注入独立 sentinel，断言调用方
+ * 只收到固定错误，日志、Alert 和 Widget 可见输出也不包含 sentinel。
+ */
+test("WebView 失败不会泄露完整 URL 或 Key", async (t) => {
+  const failureStages = ["load", "evaluate", "present"];
+
+  for (const stage of failureStages) {
+    await t.test(stage, async (subtest) => {
+      const sentinelWebUrl = `https://private-${stage}.example.test/hidden-path`;
+      const sentinelKey = `sentinel-webview-${stage}-key`;
+      const error = await captureRuntimeFailure({
+        alertResponses: [{ index: 0 }],
+        keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+        runsInApp: true,
+        webViewFailures: {
+          [stage]: new Error(`WebView ${stage} failed: ${sentinelWebUrl}?key=${sentinelKey}`)
+        },
+        widgetParameter: "1"
+      });
+      const result = error.runtimeResult;
+      subtest.after(() =>
+        fs.rmSync(result.documentsDirectory, { recursive: true, force: true })
+      );
+
+      assert.equal(error.message, "TeslaMate 页面打开失败");
+      assert.ok(result.logs.includes("TeslaMate 页面打开失败"));
+      assert.equal(result.script.completed, false);
+      assert.equal(result.widget, null);
+      assertSensitiveValuesAbsent(result, [sentinelWebUrl, sentinelKey]);
+      assert.equal(error.message.includes(sentinelWebUrl), false);
+      assert.equal(error.message.includes(sentinelKey), false);
+    });
+  }
+});
+
+/**
  * 验证已配置 App 菜单可以进入预填表单，并允许用户取消而不改动安全存储。
  *
  * 使用场景：用户只想查看现有配置但不保存。入参为 node:test 上下文；无返回值。
@@ -673,6 +755,12 @@ test("App 配置表单合法保存时写入标准化 JSON 并显示成功提示"
     presentation: "alert",
     textFields: [],
     title: "保存成功"
+  });
+  // 合法保存必须以一个 schema JSON 原子写入，不允许将三项凭据拆成多个 Keychain.set。
+  assert.equal(result.keychainSetCalls.length, 1);
+  assert.deepEqual(result.keychainSetCalls[0], {
+    key: RUNTIME_CONFIG_KEY,
+    valueLength: result.keychain[RUNTIME_CONFIG_KEY].length
   });
 });
 
@@ -1095,6 +1183,37 @@ test("TeslaMate 请求失败日志不泄露 Key 或完整 URL", async (t) => {
     `${SENTINEL_API_BASE_URL}/api/v1/cars/2/status`,
     SENTINEL_WEB_URL
   ]);
+});
+
+/**
+ * 验证没有车辆缓存时，TeslaMate 请求异常不会原样暴露给 Scriptable。
+ *
+ * 使用场景：首次运行或缓存被清理后，Request Error 可能包含完整私有 API URL。入参为
+ * node:test 上下文；无返回值。测试注入带 URL 和 Key 的 sentinel Error，断言业务仍以
+ * “车辆状态加载失败”结束，同时所有已产生的日志、Alert 与 Widget 输出均不含敏感值。
+ */
+test("无车辆缓存时 TeslaMate 请求失败抛出固定脱敏错误", async (t) => {
+  const sentinelApiUrl = "https://private-api.example.test/secret/status";
+  const sentinelKey = "sentinel-request-key-never-real";
+  const error = await captureRuntimeFailure({
+    jsonResponse() {
+      throw new Error(`TeslaMate request failed: ${sentinelApiUrl}?key=${sentinelKey}`);
+    },
+    keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+    runsInWidget: true,
+    widgetParameter: "1"
+  });
+  const result = error.runtimeResult;
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.equal(error.message, "车辆状态加载失败");
+  assert.deepEqual(result.logs, ["车辆状态请求失败，尝试读取缓存"]);
+  assert.equal(result.widget, null);
+  assert.equal(result.alerts.length, 0);
+  assert.equal(result.script.completed, false);
+  assertSensitiveValuesAbsent(result, [sentinelApiUrl, sentinelKey]);
+  assert.equal(error.message.includes(sentinelApiUrl), false);
+  assert.equal(error.message.includes(sentinelKey), false);
 });
 
 /**
