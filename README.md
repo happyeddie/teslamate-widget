@@ -41,12 +41,17 @@ A [Scriptable](https://scriptable.app/) widget script for TeslaMate. It shows ve
 ## Installation and Configuration
 
 1. Copy `Telsa Car.js` into Scriptable.
-2. Configure these values near the top of the script:
-   - `AMAP_API_KEY`
-   - `TESLA_MATE_API_URL`
-   - `TESLA_MATE_URL`
-3. Set the Scriptable widget parameter to the vehicle ID, for example `1`.
-4. If you also want to keep the theme marker, use `dark,1` or `1,dark`.
+2. Open Scriptable and run the script once. On first run, the script opens a configuration form instead of making network requests.
+3. Enter the following values, then tap **Save**:
+   - **AMap API Key**: the Web Service key used by the static map request.
+   - **TeslaMateApi Base URL**: the service base address, for example `https://api.example.com`. Do not append `/api/v1/cars/1/status`; the script adds the vehicle path automatically.
+   - **TeslaMate Web URL**: the base address of the TeslaMate web interface, for example `https://teslamate.example.com`.
+4. Set the Scriptable widget parameter to the vehicle ID, for example `1`.
+5. If you also want to keep the theme marker, use `dark,1` or `1,dark`.
+
+The three configuration values are stored as one versioned entry in Scriptable Keychain. They are not stored in the script or the Scriptable documents folder. Keychain availability can differ between devices or after reinstalling/migrating Scriptable, so run the script and configure it separately on every device where the widget reports that configuration is missing.
+
+To update an existing configuration, run the script in the Scriptable app, choose **Manage Configuration**, edit the values, and save. Running a configured script also provides **Open TeslaMate**. Configuration dialogs are never shown from a widget refresh.
 
 Cache files are stored in the `tesla/` folder under Scriptable documents.
 

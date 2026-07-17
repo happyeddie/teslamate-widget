@@ -1,10 +1,39 @@
+# 默认规则
+
+- 全程使用中文与 Human 和 SubAgent 对话、编辑文档和记录结论，只说明必要信息。
+- 开始项目工作前先完整阅读并理解本文件；若本文件不存在，可忽略此规则。
+
+## 开发规范
+
+- 所有代码开发都应按职责合理拆分模块，并优先复用已有模块。
+- 每个代码块和方法都应补充足以说明使用场景、业务规则与入参/出参约束的注释；`if`、`switch`、复杂公式或算法应说明分支或计算意图，使注释可作为维护文档。
+
+## 提交规范
+
+- 完成检查后可以 commit；提交信息与 change log 使用中文，绝不主动 push。
+
+## SuperPowers 使用规范
+
+- 前端代码默认不需要 TDD。
+- SuperPowers 目录默认排除在 Git 之外，不要强制提交。
+- 如有必要，默认开启 SuperPowers Visual companion，无需询问。
+- 自行安排 SubAgent 完成 SuperPowers 的 specs / plan 审查；确认无误后直接询问用户下一步如何推进实施。
+- Finish Development Branch 时，默认在本地 commit，并通过 Git 提交 PR / MR；输出 MR 链接供用户审查。
+
+## Codex Desktop
+
+- 如无明确要求，浏览器操作默认使用 Codex 内置浏览器，不使用 Playwright。
+- 使用 Computer Use 时默认在后台操作，不打扰用户的正常工作。
+
+--- project-doc ---
+
 # AI 开发约定
 
 ## 工作语言
 
 - 与用户沟通、文档、审查结论和提交信息默认使用中文。
 - 默认 README 使用纯英文；中文用户文档维护在 `README.zh-CN.md`。
-- 代码注释只在能降低理解成本时添加，避免解释显而易见的语句。
+- 代码注释应覆盖方法职责、使用场景和非直观的业务规则；避免只复述显而易见的语句。
 
 ## 项目定位
 
@@ -26,10 +55,9 @@
 
 ## 配置与数据
 
-- 用户需要在 `Telsa Car.js` 顶部配置：
-  - `AMAP_API_KEY`
-  - `TESLA_MATE_API_URL`
-  - `TESLA_MATE_URL`
+- 首次使用时，用户在 Scriptable App 内运行脚本并通过配置表单写入版本化 Keychain 配置；运行时从不在源码或 Scriptable documents 目录保存凭据。
+- 仓库 `Telsa Car.js` 与 iCloud Scriptable 运行文件 `Tesla Widget.js` 必须字节一致，二者均不得包含 Amap Key、私有 TeslaMate URL、VIN、坐标、token 或其他个人凭据。
+- 每台设备、重新安装或迁移 Scriptable 后都可能需要重新在对应设备的 Keychain 中完成配置。
 - 外部服务包括 TeslaMateApi、TeslaMate Web UI、高德静态地图 API，以及 Scriptable/iOS `Location.reverseGeocode()`。
 - `args.widgetParameter` 支持传入车 ID 和主题标记，例如 `1`、`dark,1` 或 `1,dark`。
 - 缓存目录是 Scriptable documents 下的 `tesla/`：
@@ -91,8 +119,9 @@ npm run capture:iphone:mirror:widget
 
 - 修改 UI 前先看 `docs/scriptable-capabilities.md` 和 `docs/architecture.md`。
 - 新增 Scriptable API 用法时，同步扩展 `tests/scriptable-runtime.js` 的 stub，并增加测试覆盖。
-- 保持 `Telsa Car.js` 顶部配置变量清晰可见，不要把必填配置隐藏到生成文件里。
-- 不要把真实车辆接口地址、Amap Key、VIN、坐标、token、截图中的隐私位置提交进仓库。
+- 配置读取、网络请求、缓存初始化都必须通过运行配置门禁；配置缺失时 Widget 只显示静态引导，App 内才可展示配置表单。
+- 不要把真实车辆接口地址、Amap Key、VIN、坐标、token、截图中的隐私位置写入仓库、iCloud 脚本文本、日志、测试产物或提交历史。
+- 代码完成、测试通过后，将仓库脚本完整覆盖同步到 iCloud `Tesla Widget.js`，并校验两者 SHA-256 一致；不得通过保留旧脚本配置行的方式同步。
 - README 截图应保持体积合理，并与 README 内容相关。
 - 不要主动 push。
 

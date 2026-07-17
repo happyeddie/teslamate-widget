@@ -41,12 +41,17 @@
 ## 安装与配置
 
 1. 将 `Telsa Car.js` 复制到 Scriptable。
-2. 在脚本顶部配置：
-   - `AMAP_API_KEY`
-   - `TESLA_MATE_API_URL`
-   - `TESLA_MATE_URL`
-3. 在 Scriptable Widget 的参数中传入车辆 ID，例如 `1`。
-4. 如需保留主题标记，可传入 `dark,1` 或 `1,dark`。
+2. 打开 Scriptable 并首次运行脚本。脚本会直接显示配置表单，此时不会发起网络请求。
+3. 填写以下配置并点击“保存”：
+   - **高德 API Key**：高德 Web 服务静态地图请求使用的 Key。
+   - **TeslaMateApi 基础 URL**：只填写服务基础地址，例如 `https://api.example.com`；不要追加 `/api/v1/cars/1/status`，脚本会根据车辆 ID 自动拼接接口路径。
+   - **TeslaMate Web URL**：TeslaMate Web 页面基础地址，例如 `https://teslamate.example.com`。
+4. 在 Scriptable Widget 的参数中传入车辆 ID，例如 `1`。
+5. 如需保留主题标记，可传入 `dark,1` 或 `1,dark`。
+
+三项配置会作为一个带版本号的配置项保存在 Scriptable Keychain 中，不会写入脚本或 Scriptable documents 目录。不同设备、重新安装或迁移 Scriptable 后不保证已有 Keychain 配置可用；如果 Widget 提示缺少配置，请在对应设备上重新运行脚本并完成配置。
+
+需要修改现有配置时，在 Scriptable App 内运行脚本，选择“管理配置”，修改后保存。已完成配置时，同一菜单还可选择“打开 TeslaMate”。Widget 刷新过程不会弹出配置表单。
 
 缓存文件会写入 Scriptable documents 目录下的 `tesla/` 文件夹。
 
