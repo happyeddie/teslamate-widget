@@ -552,7 +552,8 @@ async function loadCarDataWithCache(runtimeContext, runtimeConfig, carId, file) 
     return await getCarData(runtimeConfig, carId);
   }
   catch (error) {
-    console.log(error);
+    // Request 异常可能携带完整私有 URL，只记录固定分类并保留 error 供下方控制流重抛。
+    console.log("车辆状态请求失败，尝试读取缓存");
     // 只有已有缓存时才能离线回退；不存在缓存时保留原始请求失败语义。
     if (!fm.fileExists(file)) {
       throw error;
@@ -608,7 +609,8 @@ async function getCarGeo(runtimeContext, runtimeConfig, carId, car, lat, lng) {
       json = JSON.parse(json);
       console.log("Write Geo To Disk");
     } catch (e) {
-      console.log(e)
+      // 定位异常可能包含坐标或系统上下文，日志只暴露固定故障分类。
+      console.log("地理编码失败")
       // 定位失败且没有旧缓存时使用固定占位位置，保证 Widget 仍可完成渲染。
       if (json == null) {
         json = [{ name: "未知位置" }];
@@ -630,14 +632,16 @@ async function getCarGeo(runtimeContext, runtimeConfig, carId, car, lat, lng) {
 
   // 缓存缺失或车辆移动时才请求新静态地图，降低高德接口调用频率。
   if (image == null || hasCarMoved(car)) {
-    let url = `https://restapi.amap.com/v3/staticmap?scale=2&location=${geo.longitude},${geo.latitude}&zoom=${zoom}&size=150*150&key=${runtimeConfig.amapApiKey}`
-    let req = await new Request(url);
     try {
+      // URL 拼接、Request 构造和加载共享脱敏边界，任一阶段失败都不能暴露完整 URL。
+      let url = `https://restapi.amap.com/v3/staticmap?scale=2&location=${geo.longitude},${geo.latitude}&zoom=${zoom}&size=150*150&key=${runtimeConfig.amapApiKey}`
+      let req = await new Request(url);
       image = await req.loadImage();
       fm.writeImage(file, image);
       console.log("Write Map To Disk");
     } catch (e) {
-      console.log(e)
+      // Request 异常可能包含带高德 Key 的完整 query，禁止打印异常对象。
+      console.log("静态地图加载失败")
     }
   }
 
@@ -714,7 +718,8 @@ async function loadCarContext(runtimeContext, runtimeConfig, carId) {
         car.prev_geodata = prevData.data.status.car_geodata;
       }
     } catch (e) {
-      console.log(e)
+      // 损坏缓存内容或文件异常不应进入日志，只记录可用于排障的固定分类。
+      console.log("车辆缓存读取失败")
     }
   }
   // 首次运行没有历史坐标时以当前坐标初始化，避免误判车辆已移动。

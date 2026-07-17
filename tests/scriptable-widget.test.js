@@ -7,6 +7,10 @@ const test = require("node:test");
 const { collectByType, runScriptableScript } = require("./scriptable-runtime");
 
 const RUNTIME_CONFIG_KEY = "teslamate-widget.config.v1";
+const SCRIPT_PATH = path.join(__dirname, "..", "Telsa Car.js");
+const SENTINEL_AMAP_API_KEY = "sentinel-amap-key-never-real";
+const SENTINEL_API_BASE_URL = "https://api.example.test";
+const SENTINEL_WEB_URL = "https://web.example.test";
 
 /**
  * 将测试配置序列化为生产脚本使用的单键 Keychain 值。
@@ -19,9 +23,9 @@ const RUNTIME_CONFIG_KEY = "teslamate-widget.config.v1";
 function runtimeConfigJson(overrides = {}) {
   return JSON.stringify({
     schemaVersion: 1,
-    amapApiKey: "test-amap-key",
-    teslaMateApiBaseUrl: "https://teslamate-api.example.test:65535///",
-    teslaMateWebUrl: "https://teslamate.example.test:1///",
+    amapApiKey: SENTINEL_AMAP_API_KEY,
+    teslaMateApiBaseUrl: `${SENTINEL_API_BASE_URL}///`,
+    teslaMateWebUrl: `${SENTINEL_WEB_URL}///`,
     ...overrides
   });
 }
@@ -92,6 +96,29 @@ function textValues(widget) {
 
 function mapImages(widget) {
   return collectByType(widget, "image").filter((item) => item.url?.startsWith("http://maps.apple.com/"));
+}
+
+/**
+ * 断言敏感 sentinel 不会进入脚本日志、Alert 消息或 Widget 可见文案。
+ *
+ * 使用场景：网络和 Keychain 故障测试需要同时覆盖三个用户可观测输出面。入参为
+ * runtime 结果和待保护字符串数组；无返回值。只检查 Alert 的标题与消息，不检查
+ * 配置表单文本框，因为表单在用户主动管理配置时必须回显已保存值；任一输出包含
+ * 完整 sentinel 时由 node:assert 立即报告泄漏来源。
+ */
+function assertSensitiveValuesAbsent(result, sensitiveValues) {
+  const logOutput = result.logs.join("\n");
+  const alertOutput = result.alerts
+    .map((alert) => `${alert.title}\n${alert.message}`)
+    .join("\n");
+  const widgetOutput = textValues(result.widget).join("\n");
+
+  // 每个 sentinel 都必须独立检查，避免一个安全值掩盖另一个完整 URL 或 Key 泄漏。
+  for (const sensitiveValue of sensitiveValues) {
+    assert.equal(logOutput.includes(sensitiveValue), false, "日志包含敏感 sentinel");
+    assert.equal(alertOutput.includes(sensitiveValue), false, "Alert 消息包含敏感 sentinel");
+    assert.equal(widgetOutput.includes(sensitiveValue), false, "Widget 文案包含敏感 sentinel");
+  }
 }
 
 /**
@@ -275,9 +302,86 @@ test("中号桌面 widget 可以用在线车辆数据完成渲染并写入缓存
   assert.ok(textValues(result.widget).some((text) => text.includes("Model Y")));
   assert.ok(textValues(result.widget).some((text) => text.includes("331")));
   assert.ok(result.requests.some((request) =>
-    request.url === "https://teslamate-api.example.test:65535/api/v1/cars/1/status"
+    request.url === "https://api.example.test/api/v1/cars/1/status"
   ));
   assert.ok(fs.existsSync(path.join(result.documentsDirectory, "tesla", "car_data_1.json")));
+});
+
+/**
+ * 验证第二辆车完整沿用显式配置链，并把所有车辆相关缓存隔离到 ID 2。
+ *
+ * 使用场景：同一 Scriptable 脚本通过 Widget 参数服务多辆车。入参为 node:test
+ * 上下文；无返回值。测试使用全新 documents 目录，精确断言 TeslaMateApi 请求、
+ * 高德 Key、车辆链接和三类缓存文件，且不得创建任何 ID 1 缓存。
+ */
+test("车 ID 2 使用配置请求、车辆链接和独立缓存", async (t) => {
+  const result = await runScriptableScript({
+    jsonResponse: apiResponse(carStatus("online", { display_name: "Sentinel Car 2" })),
+    keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+    runsInWidget: true,
+    widgetParameter: "dark,2"
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  const cacheRoot = path.join(result.documentsDirectory, "tesla");
+  const vehicleName = collectByType(result.widget, "text")
+    .find((item) => item.text?.includes("Sentinel Car 2"));
+  const amapRequest = result.requests.find((request) =>
+    request.url.startsWith("https://restapi.amap.com/v3/staticmap?")
+  );
+
+  assert.ok(result.requests.some((request) =>
+    request.url === "https://api.example.test/api/v1/cars/2/status"
+  ));
+  assert.ok(amapRequest);
+  assert.ok(amapRequest.url.includes(`key=${SENTINEL_AMAP_API_KEY}`));
+  assert.equal(vehicleName?.url, SENTINEL_WEB_URL);
+
+  // 车辆数据、地理文字和地图图片必须共享同一个显式 ID，不能回落到默认车辆 1。
+  for (const filename of ["car_data_2.json", "car_map_2.json", "car_map_2.png"]) {
+    assert.equal(fs.existsSync(path.join(cacheRoot, filename)), true);
+  }
+  for (const filename of ["car_data_1.json", "car_map_1.json", "car_map_1.png"]) {
+    assert.equal(fs.existsSync(path.join(cacheRoot, filename)), false);
+  }
+});
+
+/**
+ * 静态审计生产脚本不再声明旧配置全局或隐式全局车辆 ID。
+ *
+ * 使用场景：运行测试只能覆盖已执行分支，源码断言用于阻止旧变量名或调用签名回归。
+ * 无业务入参；测试直接读取固定入口文件。读取失败、旧标识出现或关键函数丢失显式
+ * 参数时均由 node:assert 报错。
+ */
+test("源码只使用显式 runtime 配置与车辆 ID 参数链", () => {
+  const source = fs.readFileSync(SCRIPT_PATH, "utf8");
+  const legacyGlobals = [
+    "AMAP_API_KEY",
+    "TESLA_MATE_API_URL",
+    "TESLA_MATE_URL",
+    "TESLA_MATE_CAR_ID"
+  ];
+
+  // 每个历史标识都必须从生产源码完全消失，注释或兼容别名同样会形成回归入口。
+  for (const legacyGlobal of legacyGlobals) {
+    assert.equal(source.includes(legacyGlobal), false, `仍存在遗留全局 ${legacyGlobal}`);
+  }
+
+  assert.match(source, /async function getCarData\(runtimeConfig, carId\)/);
+  assert.match(source, /async function getCarGeo\(runtimeContext, runtimeConfig, carId,/);
+  assert.match(source, /async function loadCarContext\(runtimeContext, runtimeConfig, carId\)/);
+  assert.match(source, /async function renderMediumWidget\(runtimeContext, runtimeConfig, carId\)/);
+  assert.match(source, /function renderCarInfo\(left, car, runtimeConfig\)/);
+  assert.doesNotMatch(source, /^\s*(?:id|carId)\s*=/m);
+  assert.doesNotMatch(
+    source,
+    /console\.log\s*\([^)]*\b(?:error|err|exception|e)\b[^)]*\)/
+  );
+  assert.doesNotMatch(source, /new Request\(url\);\s*try\s*\{/);
+  assert.doesNotMatch(
+    source,
+    /if \(image == null \|\| hasCarMoved\(car\)\) \{\s*let url =/
+  );
 });
 
 test("中号桌面 widget 地图图片填满右侧容器", async (t) => {
@@ -387,7 +491,7 @@ test("App 操作菜单选择打开 TeslaMate 时展示当前车辆 WebView", asy
     title: "TeslaMate Widget"
   });
   assert.equal(result.webViews.length, 1);
-  assert.equal(result.webViews[0].loadedURL, "https://teslamate.example.test:1");
+  assert.equal(result.webViews[0].loadedURL, SENTINEL_WEB_URL);
   assert.equal(result.webViews[0].presented, true);
   assert.equal(result.webViews[0].evaluatedJavaScript.length, 3);
   assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_2"));
@@ -415,12 +519,12 @@ test("App 操作菜单选择管理配置时预填安全表单且取消不保存"
     message: "配置将保存在 iOS Keychain 中",
     presentation: "alert",
     textFields: [
-      { placeholder: "高德 API Key", secure: true, value: "test-amap-key" },
+      { placeholder: "高德 API Key", secure: true, value: SENTINEL_AMAP_API_KEY },
       {
         placeholder: "TeslaMateApi 基础 URL",
-        value: "https://teslamate-api.example.test:65535"
+        value: SENTINEL_API_BASE_URL
       },
-      { placeholder: "TeslaMate Web URL", value: "https://teslamate.example.test:1" }
+      { placeholder: "TeslaMate Web URL", value: SENTINEL_WEB_URL }
     ],
     title: "管理配置"
   });
@@ -830,4 +934,196 @@ test("TeslaMate API 失败时可以读取已有车辆缓存继续渲染", async 
   assert.equal(result.script.completed, true);
   assert.equal(result.widget.presented, "medium");
   assert.ok(textValues(result.widget).some((text) => text.includes("Model Y")));
+});
+
+/**
+ * 验证 TeslaMate 请求异常只输出固定分类日志，并继续使用指定车辆缓存。
+ *
+ * 使用场景：私有 API 地址可能被 Request 异常对象携带，日志不得输出该对象。入参为
+ * node:test 上下文；无返回值。测试预置车 ID 2 缓存并注入请求失败，断言固定日志、
+ * 缓存渲染和三个用户可见输出面均不含完整 sentinel 配置。
+ */
+test("TeslaMate 请求失败日志不泄露 Key 或完整 URL", async (t) => {
+  const documentsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-api-redaction-"));
+  t.after(() => fs.rmSync(documentsDirectory, { recursive: true, force: true }));
+  const cacheRoot = path.join(documentsDirectory, "tesla");
+  fs.mkdirSync(cacheRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(cacheRoot, "car_data_2.json"),
+    JSON.stringify(apiResponse(carStatus("offline", { display_name: "Cached Car 2" }))),
+    "utf8"
+  );
+
+  const result = await runScriptableScript({
+    documentsDirectory,
+    jsonResponse(request) {
+      // 异常显式携带生产请求的完整 URL，确保打印异常对象会被下方 sentinel 断言捕获。
+      throw new Error(`sentinel TeslaMate request failed: ${request.url}`);
+    },
+    keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+    runsInWidget: true,
+    widgetParameter: "2"
+  });
+
+  assert.ok(result.logs.includes("车辆状态请求失败，尝试读取缓存"));
+  assert.ok(textValues(result.widget).some((text) => text.includes("Cached Car 2")));
+  assertSensitiveValuesAbsent(result, [
+    SENTINEL_AMAP_API_KEY,
+    `${SENTINEL_API_BASE_URL}/api/v1/cars/2/status`,
+    SENTINEL_WEB_URL
+  ]);
+});
+
+/**
+ * 验证高德静态地图失败时使用固定日志和占位图片，不回显请求配置。
+ *
+ * 使用场景：地图请求 URL 含高德 Key、坐标和完整 query，异常对象不得进入日志。
+ * 入参为 node:test 上下文；无返回值。测试确认请求确实使用 sentinel Key，同时日志、
+ * Alert 消息及 Widget 文案保持脱敏，渲染生命周期仍正常完成。
+ */
+test("高德地图图片失败日志不泄露 Key 或完整 URL", async (t) => {
+  const result = await runScriptableScript({
+    failImages: true,
+    jsonResponse: apiResponse(carStatus("online")),
+    keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+    runsInWidget: true,
+    widgetParameter: "1"
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  const amapRequest = result.requests.find((request) =>
+    request.url.startsWith("https://restapi.amap.com/v3/staticmap?")
+  );
+  assert.ok(amapRequest);
+  assert.ok(amapRequest.url.includes(`key=${SENTINEL_AMAP_API_KEY}`));
+  assert.ok(result.logs.includes("静态地图加载失败"));
+  assert.equal(result.logs.some((line) => line.includes("Mock image request failed")), false);
+  assert.equal(result.script.completed, true);
+  assertSensitiveValuesAbsent(result, [SENTINEL_AMAP_API_KEY, amapRequest.url]);
+});
+
+/**
+ * 验证反向地理编码异常不打印可能携带隐私数据的错误对象。
+ *
+ * 使用场景：系统定位服务异常可能包含坐标或调用上下文。入参为 node:test 上下文；
+ * 无返回值。拒绝 thenable 模拟带 sentinel 的异步异常，生产脚本应记录固定分类日志、
+ * 使用“未知位置”回退并保持所有可见输出面不含异常详情。
+ */
+test("地理编码失败日志不泄露异常详情", async (t) => {
+  const sentinelGeocodeError = "sentinel-geocode-private-coordinate";
+  const result = await runScriptableScript({
+    jsonResponse: apiResponse(carStatus("online")),
+    keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+    reverseGeocode: {
+      // Promise 同化会调用 then；只触发 reject，精确进入生产脚本的定位异常分支。
+      then(resolve, reject) {
+        reject(new Error(sentinelGeocodeError));
+      }
+    },
+    runsInWidget: true,
+    widgetParameter: "1"
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.ok(result.logs.includes("地理编码失败"));
+  assert.ok(textValues(result.widget).some((text) => text.includes("未知位置")));
+  assertSensitiveValuesAbsent(result, [sentinelGeocodeError]);
+});
+
+/**
+ * 验证损坏的旧车辆缓存只产生固定分类日志，并由在线响应覆盖修复。
+ *
+ * 使用场景：在线请求成功后，上一坐标缓存仍可能因截断或历史格式损坏而解析失败。
+ * 入参为 node:test 上下文；无返回值。测试预置含 sentinel 的非法 JSON，断言 Widget
+ * 使用在线数据完成渲染、异常详情不进入输出面，且最终缓存被有效响应替换。
+ */
+test("损坏车辆缓存读取失败时记录固定脱敏日志", async (t) => {
+  const sentinelCorruptCache = "sentinel-corrupt-cache-private-payload";
+  const documentsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-cache-redaction-"));
+  t.after(() => fs.rmSync(documentsDirectory, { recursive: true, force: true }));
+  const cacheRoot = path.join(documentsDirectory, "tesla");
+  const cachePath = path.join(cacheRoot, "car_data_2.json");
+  fs.mkdirSync(cacheRoot, { recursive: true });
+  fs.writeFileSync(cachePath, `{${sentinelCorruptCache}`, "utf8");
+
+  const result = await runScriptableScript({
+    documentsDirectory,
+    jsonResponse: apiResponse(carStatus("online", { display_name: "Recovered Car 2" })),
+    keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+    runsInWidget: true,
+    widgetParameter: "2"
+  });
+
+  assert.ok(result.logs.includes("车辆缓存读取失败"));
+  assert.equal(result.logs.some((line) => line.includes("SyntaxError")), false);
+  assert.ok(textValues(result.widget).some((text) => text.includes("Recovered Car 2")));
+  assert.doesNotThrow(() => JSON.parse(fs.readFileSync(cachePath, "utf8")));
+  assertSensitiveValuesAbsent(result, [sentinelCorruptCache]);
+});
+
+/**
+ * 验证 Keychain contains/get/set 三类异常均通过固定提示安全降级。
+ *
+ * 使用场景：安全存储错误对象可能携带键名或底层上下文。入参为 node:test 上下文；
+ * 无返回值。读取异常必须渲染缺失配置 Widget，写入异常必须展示通用失败 Alert；三类
+ * 场景共同检查日志、Alert 消息和 Widget 文案不含 sentinel Key 或完整 URL。
+ */
+test("Keychain contains、get、set 失败不会泄露配置", async (t) => {
+  const readFailureCases = [
+    { name: "contains", keychainFailures: { contains: true } },
+    { name: "get", keychainFailures: { get: true } }
+  ];
+
+  // 两种读取 API 失败都由同一个配置门禁处理，但分别运行以证明每个异常点均被覆盖。
+  for (const failureCase of readFailureCases) {
+    await t.test(failureCase.name, async (subtest) => {
+      const result = await runScriptableScript({
+        keychainFailures: failureCase.keychainFailures,
+        keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+        runsInWidget: true,
+        widgetParameter: "1"
+      });
+      subtest.after(() =>
+        fs.rmSync(result.documentsDirectory, { recursive: true, force: true })
+      );
+
+      assert.deepEqual(result.logs, ["运行配置读取失败"]);
+      assertMissingConfigWidget(result);
+      assertSensitiveValuesAbsent(result, [
+        SENTINEL_AMAP_API_KEY,
+        SENTINEL_API_BASE_URL,
+        SENTINEL_WEB_URL
+      ]);
+    });
+  }
+
+  await t.test("set", async (subtest) => {
+    const newSentinelKey = "sentinel-replacement-amap-key-never-real";
+    const newSentinelApiUrl = "https://replacement-api.example.test/private-base";
+    const newSentinelWebUrl = "https://replacement-web.example.test/private-base";
+    const result = await runScriptableScript({
+      alertResponses: [
+        { index: 1 },
+        {
+          index: 0,
+          textFields: [newSentinelKey, newSentinelApiUrl, newSentinelWebUrl]
+        },
+        { index: 0 }
+      ],
+      keychainFailures: { set: true },
+      keychainValues: { [RUNTIME_CONFIG_KEY]: runtimeConfigJson() },
+      runsInApp: true
+    });
+    subtest.after(() =>
+      fs.rmSync(result.documentsDirectory, { recursive: true, force: true })
+    );
+
+    assert.equal(result.alerts[2].title, "保存失败");
+    assert.equal(result.alerts[2].message, "无法保存配置，请稍后重试");
+    assertSensitiveValuesAbsent(result, [
+      newSentinelKey,
+      newSentinelApiUrl,
+      newSentinelWebUrl
+    ]);
+  });
 });
