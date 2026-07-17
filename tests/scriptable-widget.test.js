@@ -74,6 +74,21 @@ function mapImages(widget) {
   return collectByType(widget, "image").filter((item) => item.url?.startsWith("http://maps.apple.com/"));
 }
 
+/**
+ * 为 runtime 能力测试创建临时 Scriptable 脚本。
+ *
+ * 使用场景：测试尚未被主脚本使用的 Scriptable 全局 API，避免为了测试 stub
+ * 而修改生产脚本。入参为测试上下文和完整脚本源码；无返回值。临时目录由
+ * `t.after()` 在测试结束后删除，写入异常会直接使当前测试失败。
+ */
+function writeRuntimeTestScript(t, source) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-runtime-script-"));
+  const scriptPath = path.join(directory, "runtime-test.js");
+  fs.writeFileSync(scriptPath, source, "utf8");
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  return scriptPath;
+}
+
 test("中号桌面 widget 可以用在线车辆数据完成渲染并写入缓存", async (t) => {
   const result = await runScriptableScript({
     jsonResponse: apiResponse(carStatus("online")),
@@ -180,6 +195,106 @@ test("App 内运行时打开 TeslaMate WebView 并隐藏非当前车辆卡片", 
   assert.equal(result.webViews[0].presented, true);
   assert.equal(result.webViews[0].evaluatedJavaScript.length, 3);
   assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_2"));
+});
+
+test("App 配置场景暴露隔离的 Keychain 与 Alert 观测结果", async (t) => {
+  const result = await runScriptableScript({
+    alertResponses: [{ index: -1 }],
+    keychainValues: {},
+    runsInApp: true
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.deepEqual(result.alerts, []);
+  assert.deepEqual(result.keychain, {});
+});
+
+test("Keychain 在单次 runtime 内保存变更并返回最终克隆", async (t) => {
+  const result = await runScriptableScript({
+    keychainValues: { existing: "initial", removeMe: "discard" },
+    scriptPath: writeRuntimeTestScript(t, `
+      if (!Keychain.contains("existing")) throw new Error("existing key is unavailable");
+      if (Keychain.get("existing") !== "initial") throw new Error("unexpected existing value");
+      Keychain.set("added", "new value");
+      Keychain.remove("removeMe");
+      Script.complete();
+    `)
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.deepEqual(result.keychain, { added: "new value", existing: "initial" });
+});
+
+test("Keychain 对配置的失败操作抛出固定测试错误", async (t) => {
+  const scriptPath = writeRuntimeTestScript(t, `
+    Keychain.set("configured", "value");
+    Script.complete();
+  `);
+
+  await assert.rejects(
+    runScriptableScript({
+      keychainFailures: { set: true },
+      scriptPath
+    }),
+    new Error("Mock Keychain set failed")
+  );
+});
+
+test("Alert 记录展示信息、按顺序消费响应并返回文本框输入", async (t) => {
+  const result = await runScriptableScript({
+    alertResponses: [
+      { index: 0, textFields: ["fake-amap-key"] },
+      { index: -1 }
+    ],
+    scriptPath: writeRuntimeTestScript(t, `
+      const setup = new Alert();
+      setup.title = "配置 TeslaMate";
+      setup.message = "请填写连接信息";
+      setup.addAction("保存");
+      setup.addCancelAction("取消");
+      setup.addTextField("高德 Key", "");
+      if (await setup.presentAlert() !== 0) throw new Error("unexpected setup response");
+      if (setup.textFieldValue(0) !== "fake-amap-key") throw new Error("unexpected text field value");
+
+      const confirmation = new Alert();
+      confirmation.title = "保存成功";
+      confirmation.addAction("确定");
+      if (await confirmation.presentSheet() !== -1) throw new Error("unexpected cancellation response");
+      Script.complete();
+    `)
+  });
+  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+
+  assert.deepEqual(result.alerts, [
+    {
+      actions: ["保存"],
+      cancelAction: "取消",
+      message: "请填写连接信息",
+      presentation: "alert",
+      textFields: [{ placeholder: "高德 Key", value: "" }],
+      title: "配置 TeslaMate"
+    },
+    {
+      actions: ["确定"],
+      cancelAction: null,
+      message: "",
+      presentation: "sheet",
+      textFields: [],
+      title: "保存成功"
+    }
+  ]);
+});
+
+test("Alert 响应不足时明确报错，避免静默选择默认动作", async (t) => {
+  await assert.rejects(
+    runScriptableScript({
+      scriptPath: writeRuntimeTestScript(t, `
+        const alert = new Alert();
+        await alert.presentAlert();
+      `)
+    }),
+    new Error("Missing alert response")
+  );
 });
 
 test("TeslaMate API 失败时可以读取已有车辆缓存继续渲染", async (t) => {
