@@ -444,7 +444,8 @@ async function runScriptableScript(options = {}) {
      *
      * 使用场景：供两种展示 API 统一执行，入参为 `alert` 或 `sheet` 展示类型，
      * 返回 Promise<number>。每次调用严格消费一个响应；响应不足或消费到取消响应时
-     * 分别抛错或返回 -1，避免测试静默选择默认动作。
+     * 分别抛错或返回 -1；只有现有动作范围内的非负整数才会返回，避免测试静默选择
+     * 不存在的默认动作。
      */
     async present(presentation) {
       // 不允许没有测试编排的交互继续执行，否则会掩盖遗漏的配置向导分支。
@@ -463,10 +464,13 @@ async function runScriptableScript(options = {}) {
         title: this.title
       });
 
-      // Scriptable 仅用非负整数代表动作下标，所有取消或异常响应都统一映射为 -1。
-      return Number.isInteger(this.response.index) && this.response.index >= 0
-        ? this.response.index
-        : -1;
+      // 仅接受已注册动作的下标；负数、非整数及越过动作数组长度的响应都按取消处理。
+      if (Number.isInteger(this.response.index) &&
+        this.response.index >= 0 &&
+        this.response.index < this.actions.length) {
+        return this.response.index;
+      }
+      return -1;
     }
   }
 

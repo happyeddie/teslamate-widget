@@ -85,8 +85,27 @@ function writeRuntimeTestScript(t, source) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-runtime-script-"));
   const scriptPath = path.join(directory, "runtime-test.js");
   fs.writeFileSync(scriptPath, source, "utf8");
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => {
+    // 测试结束后删除临时脚本，避免失败路径也在系统临时目录留下测试产物。
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
   return scriptPath;
+}
+
+/**
+ * 为可能抛错的 runtime 调用预先分配并注册清理 documents 目录。
+ *
+ * 使用场景：`runScriptableScript()` 抛错时不会返回结果对象，测试无法从结果中取得
+ * 默认目录。入参为测试上下文；返回临时目录绝对路径。无论断言通过或异常，注册的
+ * 清理回调都会删除目录，目录创建异常直接使测试失败。
+ */
+function createRuntimeDocumentsDirectory(t) {
+  const documentsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-runtime-documents-"));
+  t.after(() => {
+    // 故障注入测试也必须释放 documents 目录，防止测试运行持续累积临时文件。
+    fs.rmSync(documentsDirectory, { recursive: true, force: true });
+  });
+  return documentsDirectory;
 }
 
 test("中号桌面 widget 可以用在线车辆数据完成渲染并写入缓存", async (t) => {
@@ -197,49 +216,131 @@ test("App 内运行时打开 TeslaMate WebView 并隐藏非当前车辆卡片", 
   assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_2"));
 });
 
+/**
+ * 验证 App 配置路径始终返回可观察的 Keychain 与 Alert 空状态。
+ *
+ * 使用场景：生产脚本尚未触发配置弹窗时，测试仍能读取 runtime 的稳定结果结构。
+ * 入参为 node:test 上下文；无返回值。运行或断言异常由测试框架报告。
+ */
 test("App 配置场景暴露隔离的 Keychain 与 Alert 观测结果", async (t) => {
   const result = await runScriptableScript({
     alertResponses: [{ index: -1 }],
     keychainValues: {},
     runsInApp: true
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  t.after(() => {
+    // 当前 App 路径未消费响应，仍需清理本次 runtime 的默认 documents 目录。
+    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
+  });
 
   assert.deepEqual(result.alerts, []);
   assert.deepEqual(result.keychain, {});
 });
 
+/**
+ * 验证 Keychain 读写删除仅影响本次 runtime，并可通过结果快照检查。
+ *
+ * 使用场景：配置向导保存或迁移安全配置后的回归测试。入参为 node:test 上下文；
+ * 无返回值。临时脚本主动抛出的业务错误或断言失败均应使测试失败。
+ */
 test("Keychain 在单次 runtime 内保存变更并返回最终克隆", async (t) => {
   const result = await runScriptableScript({
     keychainValues: { existing: "initial", removeMe: "discard" },
     scriptPath: writeRuntimeTestScript(t, `
+      // 读取前必须识别预置键，缺失代表 runtime 未隔离地注入初始安全存储。
       if (!Keychain.contains("existing")) throw new Error("existing key is unavailable");
+      // 预置值必须保持原样，避免配置加载阶段读取到错误数据。
       if (Keychain.get("existing") !== "initial") throw new Error("unexpected existing value");
+      // 保存新配置并删除迁移后不再使用的旧配置。
       Keychain.set("added", "new value");
       Keychain.remove("removeMe");
       Script.complete();
     `)
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  t.after(() => {
+    // 成功路径可从结果取得目录，测试结束时释放其文件缓存。
+    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
+  });
 
   assert.deepEqual(result.keychain, { added: "new value", existing: "initial" });
 });
 
-test("Keychain 对配置的失败操作抛出固定测试错误", async (t) => {
-  const scriptPath = writeRuntimeTestScript(t, `
-    Keychain.set("configured", "value");
-    Script.complete();
-  `);
+/**
+ * 验证四个 Keychain 操作都能独立注入固定错误。
+ *
+ * 使用场景：配置读取、保存与清除各自的异常分支回归。入参为 node:test 上下文；
+ * 无返回值。任一操作未抛出对应固定错误即使测试失败。
+ */
+test("Keychain 对四类配置失败操作抛出固定测试错误", async (t) => {
+  const documentsDirectory = createRuntimeDocumentsDirectory(t);
+  // 每个临时脚本只调用一个 API，以验证对应 keychainFailures 布尔开关的独立语义。
+  const failureCases = [
+    { operation: "contains", source: "Keychain.contains(\"configured\");" },
+    { operation: "get", source: "Keychain.get(\"configured\");" },
+    { operation: "set", source: "Keychain.set(\"configured\", \"value\");" },
+    { operation: "remove", source: "Keychain.remove(\"configured\");" }
+  ];
 
+  // 每轮只开启一个故障开关，保证断言可定位到具体 Scriptable API 操作。
+  for (const failureCase of failureCases) {
+    await assert.rejects(
+      runScriptableScript({
+        documentsDirectory,
+        keychainFailures: { [failureCase.operation]: true },
+        scriptPath: writeRuntimeTestScript(t, failureCase.source)
+      }),
+      new Error(`Mock Keychain ${failureCase.operation} failed`)
+    );
+  }
+});
+
+/**
+ * 验证未保存的 Keychain 键不会被解释为空配置。
+ *
+ * 使用场景：配置首次运行时区分“未配置”和“配置为空”的业务分支。入参为 node:test
+ * 上下文；无返回值。若未抛出缺失值错误，测试框架将报告失败。
+ */
+test("Keychain 读取缺失键时抛出固定错误", async (t) => {
   await assert.rejects(
     runScriptableScript({
-      keychainFailures: { set: true },
-      scriptPath
+      documentsDirectory: createRuntimeDocumentsDirectory(t),
+      scriptPath: writeRuntimeTestScript(t, "Keychain.get(\"missing\");")
     }),
-    new Error("Mock Keychain set failed")
+    new Error("Missing keychain value")
   );
 });
 
+/**
+ * 验证响应下标只能选择已注册的动作。
+ *
+ * 使用场景：测试编排传入过期或错误的动作下标时，runtime 必须按取消处理而非返回
+ * 不存在的动作。入参为 node:test 上下文；无返回值。越界下标被接受会由临时脚本抛错。
+ */
+test("Alert 对大于等于动作数量的响应下标返回取消", async (t) => {
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 1 }],
+    scriptPath: writeRuntimeTestScript(t, `
+      const alert = new Alert();
+      alert.addAction("保存");
+      // 当前 Alert 只有下标 0 的动作；下标 1 必须按取消处理。
+      if (await alert.presentAlert() !== -1) throw new Error("out-of-range response index was accepted");
+      Script.complete();
+    `)
+  });
+  t.after(() => {
+    // 越界响应正常被转换为取消后，释放成功运行产生的 documents 目录。
+    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
+  });
+
+  assert.equal(result.script.completed, true);
+});
+
+/**
+ * 验证 Alert 记录展示信息，严格消费响应，并返回当前文本框输入。
+ *
+ * 使用场景：配置向导的保存与确认提示回归。入参为 node:test 上下文；无返回值；
+ * 临时脚本中任意响应、文本值或取消语义不符都会抛出业务错误。
+ */
 test("Alert 记录展示信息、按顺序消费响应并返回文本框输入", async (t) => {
   const result = await runScriptableScript({
     alertResponses: [
@@ -253,17 +354,22 @@ test("Alert 记录展示信息、按顺序消费响应并返回文本框输入",
       setup.addAction("保存");
       setup.addCancelAction("取消");
       setup.addTextField("高德 Key", "");
+      // 第一份响应选择保存，且其文本框值应在展示后可读取。
       if (await setup.presentAlert() !== 0) throw new Error("unexpected setup response");
       if (setup.textFieldValue(0) !== "fake-amap-key") throw new Error("unexpected text field value");
 
       const confirmation = new Alert();
       confirmation.title = "保存成功";
       confirmation.addAction("确定");
+      // 第二份响应显式取消保存成功提示，取消值必须统一为 -1。
       if (await confirmation.presentSheet() !== -1) throw new Error("unexpected cancellation response");
       Script.complete();
     `)
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  t.after(() => {
+    // 断言展示快照后清理成功运行产生的 documents 目录。
+    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
+  });
 
   assert.deepEqual(result.alerts, [
     {
@@ -285,11 +391,19 @@ test("Alert 记录展示信息、按顺序消费响应并返回文本框输入",
   ]);
 });
 
+/**
+ * 验证没有编排响应时 Alert 不会静默选择默认动作。
+ *
+ * 使用场景：后续配置向导新增弹窗却遗漏测试响应时，尽早暴露测试编排缺口。入参为
+ * node:test 上下文；无返回值。仅接受固定的响应不足错误。
+ */
 test("Alert 响应不足时明确报错，避免静默选择默认动作", async (t) => {
   await assert.rejects(
     runScriptableScript({
+      documentsDirectory: createRuntimeDocumentsDirectory(t),
       scriptPath: writeRuntimeTestScript(t, `
         const alert = new Alert();
+        // 未传入 alertResponses 时，展示必须抛出固定错误而非选择任意动作。
         await alert.presentAlert();
       `)
     }),
