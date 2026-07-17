@@ -23,12 +23,32 @@ function parseWidgetParameters(widgetParameter) {
 }
 
 /**
+ * 校验 HTTP authority 中显式端口是否为可用的十进制端口号。
+ *
+ * 使用场景：normalizeHttpBaseUrl 在普通 host 或 IPv6 host 后发现冒号端口时调用。
+ * 入参为不含冒号的字符串；仅当内容全部为十进制数字且数值位于 1..65535 时返回
+ * true，其余类型、空值、符号、小数和越界值返回 false。方法不抛异常、不记录输入，
+ * 避免错误路径泄露完整私有 URL。
+ */
+function isValidHttpPort(value) {
+  // 先约束为非空纯数字字符串，避免 parseInt 接受 `80abc`、符号或小数等前缀输入。
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    return false;
+  }
+
+  const port = parseInt(value, 10);
+  // TCP/UDP 端口 0 不可作为远端服务端口，65535 是允许的最大值。
+  return port >= 1 && port <= 65535;
+}
+
+/**
  * 标准化并验证 HTTP(S) 基础 URL。
  *
  * 使用场景：Keychain 读取和配置保存都必须得到可安全拼接路径的基础地址。入参可为
  * 任意值；成功返回 `{ ok: true, value }`，其中 value 已去除全部末尾斜杠；
- * 失败返回不含原始输入的 `{ ok: false, message }`。本方法不依赖 JavaScriptCore 可能
- * 未提供的 URL 全局对象，也不发起网络请求。
+ * 失败返回不含原始输入的 `{ ok: false, message }`。authority 只接受非空 host 和
+ * 可选的 1..65535 纯数字端口；本方法不依赖 JavaScriptCore 可能未提供的 URL 全局
+ * 对象，也不发起网络请求。
  */
 function normalizeHttpBaseUrl(value) {
   // URL 字段必须是字符串；其他类型不能安全执行后续显式字符串规则。
@@ -60,18 +80,40 @@ function normalizeHttpBaseUrl(value) {
     : authorityAndPath;
   const hostAndPort = authority.slice(authority.lastIndexOf("@") + 1);
   let host = "";
-  // IPv6 host 必须包含成对方括号；缺少右括号时保持空 host 并进入统一失败分支。
+  let authorityIsValid = true;
+  // IPv6 host 必须包含成对方括号，右括号后只能为空或跟随单个合法冒号端口。
   if (hostAndPort.charAt(0) === "[") {
     const closingBracketIndex = hostAndPort.indexOf("]");
     host = closingBracketIndex > 1 ? hostAndPort.slice(1, closingBracketIndex) : "";
+    const suffix = closingBracketIndex >= 0
+      ? hostAndPort.slice(closingBracketIndex + 1)
+      : "";
+    // 空后缀表示未指定端口；非空后缀必须是 `:` 加合法端口，其他文字一律拒绝。
+    if (suffix && (suffix.charAt(0) !== ":" || !isValidHttpPort(suffix.slice(1)))) {
+      authorityIsValid = false;
+    }
   }
-  // 普通 host 以首个冒号分隔可选端口，只提取冒号前的主机部分做判空。
+  // 普通 host 最多包含一个端口分隔冒号；多个冒号必须使用上方 IPv6 方括号格式。
   else {
-    host = hostAndPort.split(":")[0];
+    const firstPortSeparator = hostAndPort.indexOf(":");
+    const lastPortSeparator = hostAndPort.lastIndexOf(":");
+    host = firstPortSeparator >= 0
+      ? hostAndPort.slice(0, firstPortSeparator)
+      : hostAndPort;
+    // 发现端口时必须只有一个分隔冒号，且冒号后的端口满足纯数字和范围规则。
+    if (firstPortSeparator >= 0 &&
+      (firstPortSeparator !== lastPortSeparator ||
+        !isValidHttpPort(hostAndPort.slice(firstPortSeparator + 1)))) {
+      authorityIsValid = false;
+    }
   }
   // 协议后、首个路径前必须存在 host；空值同时覆盖 `https:///path` 和 `http://:8080`。
   if (!host) {
     return { ok: false, message: "URL 必须包含主机地址" };
+  }
+  // host 存在但端口或 IPv6 后缀非法时返回固定消息，不包含原始 authority。
+  if (!authorityIsValid) {
+    return { ok: false, message: "URL 端口或主机格式无效" };
   }
 
   let baseUrl = normalizedValue;

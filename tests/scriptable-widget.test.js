@@ -20,8 +20,8 @@ function runtimeConfigJson(overrides = {}) {
   return JSON.stringify({
     schemaVersion: 1,
     amapApiKey: "test-amap-key",
-    teslaMateApiBaseUrl: "https://teslamate-api.example.test///",
-    teslaMateWebUrl: "https://teslamate.example.test///",
+    teslaMateApiBaseUrl: "https://teslamate-api.example.test:65535///",
+    teslaMateWebUrl: "https://teslamate.example.test:1///",
     ...overrides
   });
 }
@@ -184,6 +184,34 @@ test("配置缺失、损坏或读取失败时 Widget 显示配置提示且不产
       }
     },
     {
+      name: "TeslaMateApi IPv6 host 包含非法后缀",
+      keychainValues: {
+        [RUNTIME_CONFIG_KEY]: runtimeConfigJson({ teslaMateApiBaseUrl: "http://[::1]oops" })
+      }
+    },
+    {
+      name: "TeslaMateApi 端口不是纯数字",
+      keychainValues: {
+        [RUNTIME_CONFIG_KEY]: runtimeConfigJson({
+          teslaMateApiBaseUrl: "http://example.test:not-a-port"
+        })
+      }
+    },
+    {
+      name: "TeslaMateApi 端口小于合法范围",
+      keychainValues: {
+        [RUNTIME_CONFIG_KEY]: runtimeConfigJson({ teslaMateApiBaseUrl: "http://example.test:0" })
+      }
+    },
+    {
+      name: "TeslaMateApi 端口大于合法范围",
+      keychainValues: {
+        [RUNTIME_CONFIG_KEY]: runtimeConfigJson({
+          teslaMateApiBaseUrl: "http://example.test:65536"
+        })
+      }
+    },
+    {
       name: "TeslaMate Web URL 包含空白",
       keychainValues: {
         [RUNTIME_CONFIG_KEY]: runtimeConfigJson({
@@ -247,7 +275,7 @@ test("中号桌面 widget 可以用在线车辆数据完成渲染并写入缓存
   assert.ok(textValues(result.widget).some((text) => text.includes("Model Y")));
   assert.ok(textValues(result.widget).some((text) => text.includes("331")));
   assert.ok(result.requests.some((request) =>
-    request.url === "https://teslamate-api.example.test/api/v1/cars/1/status"
+    request.url === "https://teslamate-api.example.test:65535/api/v1/cars/1/status"
   ));
   assert.ok(fs.existsSync(path.join(result.documentsDirectory, "tesla", "car_data_1.json")));
 });
@@ -343,7 +371,7 @@ test("App 内运行时打开 TeslaMate WebView 并隐藏非当前车辆卡片", 
   t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
 
   assert.equal(result.webViews.length, 1);
-  assert.equal(result.webViews[0].loadedURL, "https://teslamate.example.test");
+  assert.equal(result.webViews[0].loadedURL, "https://teslamate.example.test:1");
   assert.equal(result.webViews[0].presented, true);
   assert.equal(result.webViews[0].evaluatedJavaScript.length, 3);
   assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_2"));
