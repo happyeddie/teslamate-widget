@@ -4,10 +4,6 @@ Language: **English** | [Chinese](./README.zh-CN.md)
 
 A [Scriptable](https://scriptable.app/) widget script for TeslaMate. It shows vehicle status, range, charging state, location, and map information on the iOS Home Screen and Lock Screen.
 
-![asleep](./docs/asleep.jpg)
-
-![charging](./docs/charging.jpg)
-
 ![lock screen](./docs/lock_screen.png)
 
 ## Table of Contents

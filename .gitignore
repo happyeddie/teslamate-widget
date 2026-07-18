@@ -1,7 +1,38 @@
 .DS_Store
+
+# Node.js 依赖、覆盖率与本地日志
 node_modules/
 npm-debug.log*
+*.log
 coverage/
 .nyc_output/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# 编辑器与操作系统生成的本地状态
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 本地环境变量、证书和签名材料；仅允许提交显式维护的示例文件
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+
+# Scriptable 用户配置和车辆缓存可能包含接口地址、密钥、VIN 与位置数据
+teslamate/
+tesla/
+config.v1.json
+config.v1.pending.json
+config.v1.backup.json
+
+# 本地设计过程与真实设备验收产物
 docs/superpowers/
 test-results/

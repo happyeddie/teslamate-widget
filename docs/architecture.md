@@ -11,9 +11,9 @@
 ├── docs/
 │   ├── architecture.md
 │   ├── code-review.md
+│   ├── lock_screen.png
 │   ├── scriptable-capabilities.md
-│   ├── testing.md
-│   └── *.jpg / *.png
+│   └── testing.md
 ├── package.json
 └── tests/
     ├── scriptable-runtime.js

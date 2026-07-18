@@ -4,10 +4,6 @@
 
 基于 [Scriptable](https://scriptable.app/) 的 TeslaMate 小组件脚本，用于在 iOS 桌面和锁屏显示车辆状态、续航、充电、位置和地图信息。
 
-![休眠状态](./docs/asleep.jpg)
-
-![充电状态](./docs/charging.jpg)
-
 ![锁屏 widget](./docs/lock_screen.png)
 
 ## 目录
