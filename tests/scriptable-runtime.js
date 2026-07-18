@@ -205,30 +205,219 @@ class ListWidget extends WidgetElement {
 }
 
 class TestFileManager {
-  constructor(documentsDirectory) {
+  /**
+   * 创建与 Scriptable FileManager 对应的隔离文件系统实例。
+   *
+   * 使用场景：同一 runtime 同时需要本地车辆缓存和 iCloud 配置文件，两者必须使用不同
+   * 根目录。入参 `documentsDirectory` 是本实例唯一可操作的临时根目录；`options.kind`
+   * 标记 local 或 iCloud，`downloadedFiles` 保存已下载的绝对文件路径，`observations`
+   * 仅保存路径、长度和调用次数，绝不保存文件正文。所有可选参数均由 runtime 在本次
+   * 调用内创建，避免跨测试共享可变状态。
+   */
+  constructor(documentsDirectory, options = {}) {
     this.documents = documentsDirectory;
+    this.kind = options.kind || "local";
+    this.downloadedFiles = options.downloadedFiles || new Set();
+    this.failures = options.failures || {};
+    this.observations = options.observations || null;
+    this.observedFilePaths = new Set();
+    this.readOverrides = options.readOverrides || {};
   }
 
   cacheDirectory() { return path.join(this.documents, ".cache"); }
   createDirectory(filePath) { fs.mkdirSync(filePath, { recursive: true }); }
   documentsDirectory() { return this.documents; }
-  fileExists(filePath) { return fs.existsSync(filePath); }
+
+  /**
+   * 判断当前隔离根中是否存在指定文件。
+   *
+   * 使用场景：配置保存事务需要检查正式、备份和候选文件的存在性。入参为文件绝对路径；
+   * 调用先记录脱敏路径和次数，再按 `fileExists` 故障配置抛错，未故障时返回 Node 文件
+   * 系统的存在性布尔值。故障优先于文件访问，确保测试不会因意外状态掩盖目标分支。
+   */
+  fileExists(filePath) {
+    this.recordFileOperation("fileExists", filePath);
+    this.throwFileFailure("fileExists");
+    return fs.existsSync(filePath);
+  }
   isDirectory(filePath) {
     return fs.existsSync(filePath) && fs.statSync(filePath).isDirectory();
   }
   joinPath(lhsPath, rhsPath) { return path.join(lhsPath, rhsPath); }
+
+  /**
+   * 模拟 iCloud 文件的下载完成状态。
+   *
+   * 使用场景：配置读取会先判断文件是否已从 iCloud 下载。入参为绝对文件路径；每次
+   * 调用先以相对路径记录观测，再返回该路径是否存在于当前实例的已下载集合。本地
+   * FileManager 同样返回集合状态，以便 stub 的 API 行为保持一致。
+   */
+  isFileDownloaded(filePath) {
+    this.recordFileOperation("downloadState", filePath);
+    this.throwFileFailure("downloadState");
+    return this.downloadedFiles.has(filePath);
+  }
+
+  /**
+   * 模拟将单个 iCloud 文件下载到当前隔离根目录。
+   *
+   * 使用场景：生产脚本在读取未下载配置前调用此异步 API。入参为绝对文件路径；成功
+   * 时将路径写入已下载集合并返回 Promise<void>，不读取或记录任何文件正文。
+   */
+  async downloadFileFromiCloud(filePath) {
+    this.recordFileOperation("download", filePath);
+    this.throwFileFailure("download");
+    this.downloadedFiles.add(filePath);
+  }
+
+  /**
+   * 在 iCloud 运行时模拟原子重命名，并随文件移动迁移下载状态。
+   *
+   * 使用场景：配置事务依赖“正式文件备份、候选文件安装、故障恢复”三个移动阶段。入参
+   * 是源、目标绝对路径；先只记录目标相对路径和调用次数，再处理固定或第 N 次移动故障。
+   * 成功时创建目标父目录、同步重命名，并将已下载标记从源迁移到目标；无正常返回值。
+   */
+  move(sourcePath, destinationPath) {
+    this.recordFileOperation("move", destinationPath);
+    this.throwFileFailure("move");
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.renameSync(sourcePath, destinationPath);
+    if (this.downloadedFiles.delete(sourcePath)) {
+      this.downloadedFiles.add(destinationPath);
+    }
+  }
+
+  /**
+   * 删除当前隔离根中的文件并清除其下载状态。
+   *
+   * 使用场景：配置事务成功或恢复后需要清理候选、备份文件。入参为文件绝对路径；先记录
+   * 脱敏观测，再按 `remove` 故障配置抛错，未故障时递归强制删除并从下载集合移除。文件
+   * 不存在时保持 Node `rmSync(..., force: true)` 的静默语义。
+   */
+  remove(filePath) {
+    this.recordFileOperation("remove", filePath);
+    this.throwFileFailure("remove");
+    fs.rmSync(filePath, { recursive: true, force: true });
+    this.downloadedFiles.delete(filePath);
+  }
+
+  /**
+   * 记录 FileManager 文件操作的脱敏观测。
+   *
+   * 使用场景：runtime 测试需要确认下载流程和目标文件，但不得泄漏配置正文。入参
+   * `operation` 为固定操作名、`filePath` 为实例根目录下的绝对路径；无业务返回值。
+   * 没有观测对象的本地实例直接返回。路径一律转换为根目录相对值，并只更新对应的
+   * 调用次数与已观测路径集合；文件内容从不进入快照。
+   */
+  recordFileOperation(operation, filePath) {
+    if (!this.observations) {
+      return;
+    }
+    const relativePath = path.relative(this.documents, filePath);
+    this.observedFilePaths.add(relativePath);
+    const counterName = {
+      download: "downloadCalls",
+      downloadState: "downloadStateCalls",
+      fileExists: "fileExistsCalls",
+      move: "moveCalls",
+      readString: "readCalls",
+      remove: "removeCalls",
+      writeString: "writeCalls"
+    }[operation] || `${operation}Calls`;
+    this.observations[counterName] = (this.observations[counterName] || 0) + 1;
+  }
+
+  /**
+   * 根据当前操作和调用次数执行故障注入。
+   *
+   * 使用场景：生产层的每个文件 I/O 分支都必须可单独验证脱敏回退。入参是内部限定的
+   * 操作名；配置为 Error 时原样抛出，普通真值抛固定 Mock Error。`moveAtCall` 为正整数
+   * 时仅在该次移动抛固定错误，专门覆盖备份、安装和恢复三阶段；调用记录始终在本方法
+   * 之前完成，因此失败快照仍能准确反映尝试次数。
+   */
+  throwFileFailure(operation) {
+    if (operation === "move" && Number.isInteger(this.failures.moveAtCall) &&
+      this.observations?.moveCalls === this.failures.moveAtCall) {
+      throw new Error(`Mock iCloud FileManager move failed at call ${this.failures.moveAtCall}`);
+    }
+    const configuredFailure = this.failures[operation];
+    if (configuredFailure instanceof Error) {
+      throw configuredFailure;
+    }
+    if (configuredFailure) {
+      throw new Error(`Mock iCloud FileManager ${operation} failed`);
+    }
+  }
+
   readImage(filePath) {
     return new Image({ kind: "file", path: filePath });
   }
-  readString(filePath) { return fs.readFileSync(filePath, "utf8"); }
+
+  /**
+   * 读取文本文件，必要时按相对路径和读取次数返回测试覆盖值。
+   *
+   * 使用场景：测试需要稳定构造 pending 校验成功、正式文件复读失败的事务窗口。入参为
+   * 文件绝对路径；先记录并处理 `readString` 故障，再消费该相对路径覆盖数组的队首字符串。
+   * 覆盖数组耗尽或未配置时读取实际隔离文件；正文仅返回给 VM，观测中只记录最终文件长度。
+   */
+  readString(filePath) {
+    this.recordFileOperation("readString", filePath);
+    this.throwFileFailure("readString");
+    const relativePath = path.relative(this.documents, filePath);
+    const overrides = this.readOverrides[relativePath];
+    if (Array.isArray(overrides) && overrides.length > 0) {
+      return overrides.shift();
+    }
+    return fs.readFileSync(filePath, "utf8");
+  }
+
   temporaryDirectory() { return os.tmpdir(); }
   writeImage(filePath, image) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify(image.meta));
   }
   writeString(filePath, content) {
+    this.recordFileOperation("writeString", filePath);
+    this.throwFileFailure("writeString");
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, "utf8");
+  }
+
+  /**
+   * 生成不含正文的 iCloud 文件元数据快照。
+   *
+   * 使用场景：成功和异常结果都要让测试检查文件路径、存在性与字节长度，而不得回显配置。
+   * 无入参；返回按路径排序的 `{ path, exists, length }` 数组。结果同时包含实际根目录下的
+   * 文件和失败前已尝试操作的路径，后者即使不存在也会以 `exists: false, length: 0` 返回。
+   */
+  createFileObservations() {
+    const relativePaths = new Set(this.observedFilePaths);
+    const collectFiles = (directoryPath) => {
+      if (!fs.existsSync(directoryPath)) {
+        return;
+      }
+      for (const entry of fs.readdirSync(directoryPath, { withFileTypes: true })) {
+        const entryPath = path.join(directoryPath, entry.name);
+        if (entry.isDirectory()) {
+          collectFiles(entryPath);
+        }
+        else {
+          relativePaths.add(path.relative(this.documents, entryPath));
+        }
+      }
+    };
+    collectFiles(this.documents);
+
+    return [...relativePaths].sort().map((relativePath) => {
+      const filePath = path.join(this.documents, relativePath);
+      const exists = fs.existsSync(filePath);
+      return {
+        path: relativePath,
+        exists,
+        // 使用 stat 大小而非 readFile，确保正文不因观测逻辑进入内存快照。
+        length: exists ? fs.statSync(filePath).size : 0
+      };
+    });
   }
 }
 
@@ -324,11 +513,13 @@ function serialize(value) {
  * 运行；测试通过本方法提供受控的 API stub、网络响应、文件目录和用户交互编排，验证
  * widget、缓存及配置流程的业务结果。入参 `options` 可覆盖脚本路径、documents
  * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures`、
+ * `iCloudFiles`、`iCloudDownloadedFiles`、`iCloudFailures`、`iCloudReadOverrides`、
  * `failImages` 和 `alertResponses`；未传入的可选项使用测试安全的默认值。
  * `keychainFailures.<operation>`、`failImages` 与 `webViewFailures.<operation>` 可传布尔
  * 值或 Error：true 使用向后兼容的固定 Mock Error，Error 实例则原样抛出，供安全测试
  * 携带虚构敏感信息。成功时返回 documents 路径、请求/日志/Widget/WebView 快照、Keychain
- * 写入的脱敏观测、生命周期以及最终 Keychain 和 Alert 观测；返回值均不持有内部可变集合。
+ * 写入的脱敏观测、生命周期、iCloud 文件元数据以及最终 Keychain 和 Alert 观测；返回值
+ * 均不持有内部可变集合。iCloud 文件结果只包含路径、存在性和长度，绝不包含正文。
  * VM 异常会原样向调用方抛出，同时附加不含异常详情的 `runtimeResult` 快照，便于安全测试
  * 断言错误期间的日志、Alert 与 Widget 输出；交互响应不足仍使用固定错误供测试精确断言。
  */
@@ -336,6 +527,17 @@ async function runScriptableScript(options = {}) {
   const scriptPath = options.scriptPath || path.join(__dirname, "..", "Telsa Car.js");
   const source = fs.readFileSync(scriptPath, "utf8");
   const documentsDirectory = options.documentsDirectory || fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-docs-"));
+  const iCloudDocumentsDirectory = options.iCloudDocumentsDirectory ||
+    fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-icloud-docs-"));
+  const iCloudFileObservations = {
+    downloadCalls: 0,
+    downloadStateCalls: 0,
+    moveCalls: 0,
+    readCalls: 0,
+    removeCalls: 0,
+    writeCalls: 0,
+    files: []
+  };
   const requestLog = [];
   const logs = [];
   const keychainSetCalls = [];
@@ -355,7 +557,40 @@ async function runScriptableScript(options = {}) {
   const alertResponses = Array.isArray(options.alertResponses)
     ? options.alertResponses.map((response) => clone(response))
     : [];
-  const fileManager = new TestFileManager(documentsDirectory);
+  /**
+   * 在 iCloud 临时根预置虚构配置文件。
+   *
+   * 使用场景：测试需要模拟 Scriptable iCloud documents 中已存在但尚未下载的文件。
+   * 键必须是相对路径，值按 UTF-8 写入隔离根目录；路径逃逸会立即抛错，确保 runtime
+   * 永不触碰临时根以外的真实目录。写入过程不计入观测，因为它是测试夹具而非脚本操作。
+   */
+  for (const [relativePath, content] of Object.entries(options.iCloudFiles || {})) {
+    const destinationPath = path.resolve(iCloudDocumentsDirectory, relativePath);
+    const resolvedRelativePath = path.relative(iCloudDocumentsDirectory, destinationPath);
+    if (resolvedRelativePath === ".." || resolvedRelativePath.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativePath)) {
+      throw new Error("iCloudFiles path must be relative to iCloud documents");
+    }
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.writeFileSync(destinationPath, content, "utf8");
+  }
+  const downloadedFiles = new Set((options.iCloudDownloadedFiles || []).map((relativePath) =>
+    path.resolve(iCloudDocumentsDirectory, relativePath)
+  ));
+  const iCloudReadOverrides = Object.fromEntries(
+    Object.entries(options.iCloudReadOverrides || {}).map(([relativePath, values]) => [
+      relativePath,
+      Array.isArray(values) ? [...values] : []
+    ])
+  );
+  const localFileManager = new TestFileManager(documentsDirectory, { kind: "local" });
+  const iCloudFileManager = new TestFileManager(iCloudDocumentsDirectory, {
+    downloadedFiles,
+    failures: options.iCloudFailures || {},
+    kind: "iCloud",
+    observations: iCloudFileObservations,
+    readOverrides: iCloudReadOverrides
+  });
   const keychainValues = clone(options.keychainValues || {});
   const keychainFailures = {
     contains: options.keychainFailures?.contains || false,
@@ -661,8 +896,8 @@ async function runScriptableScript(options = {}) {
     Data,
     DrawContext,
     FileManager: {
-      local: () => fileManager,
-      iCloud: () => fileManager
+      local: () => localFileManager,
+      iCloud: () => iCloudFileManager
     },
     Font,
     Image,
@@ -702,9 +937,13 @@ async function runScriptableScript(options = {}) {
    * 只保留目标键与长度；完整最终 Keychain 仅保留既有测试兼容接口。
    */
   function createRuntimeResult() {
+    // 每次创建快照都重新扫描隔离 iCloud 根，确保成功写入、移动或失败前操作均有最终元数据。
+    iCloudFileObservations.files = iCloudFileManager.createFileObservations();
     return {
       alerts: clone(alerts),
       documentsDirectory,
+      iCloudDocumentsDirectory,
+      iCloudFileObservations: clone(iCloudFileObservations),
       keychain: clone(keychainValues),
       keychainSetCalls: clone(keychainSetCalls),
       lifecycle: clone(lifecycle),

@@ -198,6 +198,22 @@ function createRuntimeDocumentsDirectory(t) {
 }
 
 /**
+ * 为 iCloud FileManager 故障测试分配并注册清理隔离 documents 目录。
+ *
+ * 使用场景：iCloud 操作故障会让 `runScriptableScript()` 抛错，调用方只能从异常快照读取
+ * 目录，不能依赖成功结果。入参为 node:test 上下文；返回独立临时目录绝对路径，并在测试
+ * 完成时递归删除。此目录只用于 runtime stub，不会接触用户真实的 iCloud documents。
+ */
+function createRuntimeICloudDocumentsDirectory(t) {
+  const documentsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-runtime-icloud-documents-"));
+  t.after(() => {
+    // 故障断言结束后释放 iCloud stub 根，避免临时文件长期积累。
+    fs.rmSync(documentsDirectory, { recursive: true, force: true });
+  });
+  return documentsDirectory;
+}
+
+/**
  * 断言配置不可用的 Widget 在文件与网络副作用发生前安全结束。
  *
  * 使用场景：复用中号与锁屏 Widget 对空 Keychain、损坏 JSON、schema 不兼容、字段
@@ -931,6 +947,167 @@ test("Keychain 在单次 runtime 内保存变更并返回最终克隆", async (t
   });
 
   assert.deepEqual(result.keychain, { added: "new value", existing: "initial" });
+});
+
+/**
+ * 验证 runtime 将本地缓存目录与 iCloud 配置目录完全隔离，并以脱敏快照提供下载观测。
+ *
+ * 使用场景：后续配置加载逻辑需要先判断并下载 iCloud 文件，测试环境不能把配置正文或
+ * 文件根目录混入本地车辆缓存。入参为 node:test 上下文；运行时预置虚构配置文件，成功
+ * 返回的快照只允许暴露下载次数和文件元数据，任何正文泄漏或下载状态错误都会使测试失败。
+ */
+test("runtime 将本地缓存与 iCloud 配置隔离并提供脱敏文件观测", async (t) => {
+  const result = await runScriptableScript({
+    iCloudFiles: { "teslamate/config.v1.json": "sentinel-config-body" },
+    iCloudDownloadedFiles: [],
+    scriptPath: writeRuntimeTestScript(t, `
+      const local = FileManager.local();
+      const cloud = FileManager.iCloud();
+      const target = cloud.joinPath(cloud.documentsDirectory(), "teslamate/config.v1.json");
+      if (cloud.isFileDownloaded(target)) throw new Error("unexpected download state");
+      await cloud.downloadFileFromiCloud(target);
+      if (!cloud.isFileDownloaded(target)) throw new Error("download did not complete");
+      if (local.documentsDirectory() === cloud.documentsDirectory()) throw new Error("roots overlap");
+      Script.complete();
+    `)
+  });
+  t.after(() => {
+    // 两个 runtime 根目录都由本测试创建，成功结束后必须独立释放。
+    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
+    fs.rmSync(result.iCloudDocumentsDirectory, { recursive: true, force: true });
+  });
+
+  assert.equal(result.iCloudFileObservations.downloadCalls, 1);
+  assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-config-body"), false);
+});
+
+/**
+ * 验证 iCloud FileManager 能按相对路径依次消费读取覆盖值，并禁止将正文写入结果快照。
+ *
+ * 使用场景：配置保存事务需要稳定模拟“首次校验成功、正式安装后复读损坏”的竞态。入参
+ * 为 node:test 上下文；测试预置原始文件和两次覆盖正文，临时脚本必须依序读取两个覆盖
+ * 值。返回观测只能包含相对路径、文件存在性、长度和次数，任一正文进入快照即失败。
+ */
+test("iCloud readString 支持按读取次数消费脱敏覆盖值", async (t) => {
+  const result = await runScriptableScript({
+    iCloudFiles: { "teslamate/config.v1.json": "sentinel-stored-body" },
+    iCloudReadOverrides: {
+      "teslamate/config.v1.json": ["sentinel-first-read", "sentinel-second-read"]
+    },
+    scriptPath: writeRuntimeTestScript(t, `
+      const cloud = FileManager.iCloud();
+      const target = cloud.joinPath(cloud.documentsDirectory(), "teslamate/config.v1.json");
+      if (cloud.readString(target) !== "sentinel-first-read") throw new Error("first override mismatch");
+      if (cloud.readString(target) !== "sentinel-second-read") throw new Error("second override mismatch");
+      Script.complete();
+    `)
+  });
+  t.after(() => {
+    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
+    fs.rmSync(result.iCloudDocumentsDirectory, { recursive: true, force: true });
+  });
+
+  assert.equal(result.iCloudFileObservations.readCalls, 2);
+  assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-first-read"), false);
+  assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-second-read"), false);
+});
+
+/**
+ * 验证 iCloud FileManager 各阶段都可注入自定义故障，且失败快照不保存错误或配置正文。
+ *
+ * 使用场景：生产层需要分别处理下载、读取、写入、存在性检查、移动和清理失败。入参为
+ * node:test 上下文；每个子场景调用一个目标 API 并注入含 sentinel 的 Error，移动场景
+ * 则在第 1、2、3 次调用失败以覆盖备份、候选安装和恢复阶段。所有失败均保留原 Error，
+ * 快照只允许出现固定相对路径、长度和调用次数。
+ */
+test("iCloud FileManager 支持脱敏故障注入与分阶段移动失败", async (t) => {
+  const sentinelErrorText = "sentinel-iCloud-failure-body";
+  const operationCases = [
+    {
+      name: "download",
+      failureKey: "download",
+      source: "await cloud.downloadFileFromiCloud(target);",
+      callField: "downloadCalls"
+    },
+    {
+      name: "readString",
+      failureKey: "readString",
+      source: "cloud.readString(target);",
+      callField: "readCalls"
+    },
+    {
+      name: "writeString",
+      failureKey: "writeString",
+      source: 'cloud.writeString(target, "sentinel-written-body");',
+      callField: "writeCalls"
+    },
+    {
+      name: "fileExists",
+      failureKey: "fileExists",
+      source: "cloud.fileExists(target);",
+      callField: "fileExistsCalls"
+    },
+    {
+      name: "remove",
+      failureKey: "remove",
+      source: "cloud.remove(target);",
+      callField: "removeCalls"
+    }
+  ];
+
+  for (const operationCase of operationCases) {
+    await t.test(operationCase.name, async (subtest) => {
+      const error = new Error(`${sentinelErrorText}-${operationCase.name}`);
+      const runtimeError = await captureRuntimeFailure({
+        documentsDirectory: createRuntimeDocumentsDirectory(subtest),
+        iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(subtest),
+        iCloudFailures: { [operationCase.failureKey]: error },
+        iCloudFiles: { "teslamate/config.v1.json": "sentinel-config-body" },
+        scriptPath: writeRuntimeTestScript(subtest, `
+          const cloud = FileManager.iCloud();
+          const target = cloud.joinPath(cloud.documentsDirectory(), "teslamate/config.v1.json");
+          ${operationCase.source}
+        `)
+      });
+
+      assert.equal(runtimeError, error);
+      const observations = runtimeError.runtimeResult.iCloudFileObservations;
+      assert.equal(observations[operationCase.callField], 1);
+      assert.equal(JSON.stringify(observations).includes(sentinelErrorText), false);
+      assert.deepEqual(observations.files, [{
+        path: "teslamate/config.v1.json",
+        exists: true,
+        length: "sentinel-config-body".length
+      }]);
+    });
+  }
+
+  for (const failureAtCall of [1, 2, 3]) {
+    await t.test(`moveAtCall ${failureAtCall}`, async (subtest) => {
+      const iCloudFiles = {};
+      for (let index = 1; index <= failureAtCall; index += 1) {
+        iCloudFiles[`teslamate/source-${index}.json`] = `sentinel-source-${index}`;
+      }
+      const runtimeError = await captureRuntimeFailure({
+        documentsDirectory: createRuntimeDocumentsDirectory(subtest),
+        iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(subtest),
+        iCloudFailures: { moveAtCall: failureAtCall },
+        iCloudFiles,
+        scriptPath: writeRuntimeTestScript(subtest, `
+          const cloud = FileManager.iCloud();
+          for (let index = 1; index <= ${failureAtCall}; index += 1) {
+            const source = cloud.joinPath(cloud.documentsDirectory(), "teslamate/source-" + index + ".json");
+            const target = cloud.joinPath(cloud.documentsDirectory(), "teslamate/target-" + index + ".json");
+            cloud.move(source, target);
+          }
+        `)
+      });
+
+      assert.match(runtimeError.message, new RegExp(`Mock iCloud FileManager move failed at call ${failureAtCall}`));
+      assert.equal(runtimeError.runtimeResult.iCloudFileObservations.moveCalls, failureAtCall);
+      assert.equal(JSON.stringify(runtimeError.runtimeResult.iCloudFileObservations).includes("sentinel-source"), false);
+    });
+  }
 });
 
 /**
