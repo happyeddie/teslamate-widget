@@ -275,28 +275,46 @@ function readAndValidateICloudConfig(fm, filePath) {
  * 只读旧 Keychain 配置并返回一次性迁移候选状态。
  *
  * 使用场景：仅由 App 在正式与备份文件都缺失时调用；Widget 永无调用路径。无入参；
- * 有效旧 schema v1 返回只含三个业务字段的 `legacyMigrationRequired`，缺键、内容无效或
- * Keychain/JSON 异常分别返回 `missing`、`invalid`、`unavailable`。本方法绝不删除旧键。
+ * 有效旧 schema v1 返回只含三个业务字段的 `legacyMigrationRequired`；缺键返回 `missing`；
+ * schema、字段、JSON 或非字符串正文无效返回带 `source: "legacy"` 的 `invalid`；Keychain
+ * API 异常返回 `unavailable`。本方法绝不删除旧键，也不访问 iCloud 文件。
  */
 function loadLegacyMigrationCandidate() {
+  let serializedConfig;
   try {
     // 旧键不存在表示全新安装；不调用 get，避免 Scriptable 对缺失键抛异常。
     if (!Keychain.contains(RUNTIME_CONFIG_KEY)) {
       return { status: "missing" };
     }
-    const parsed = JSON.parse(Keychain.get(RUNTIME_CONFIG_KEY));
-    const businessResult = validateBusinessConfig(parsed);
-    // 旧数据也必须明确是 schema v1 且业务字段有效，其他内容只允许用户重新修复。
-    if (parsed.schemaVersion !== 1 || !businessResult.ok) {
-      return { status: "invalid" };
-    }
-    return { status: "legacyMigrationRequired", value: businessResult.value };
+    serializedConfig = Keychain.get(RUNTIME_CONFIG_KEY);
   }
   catch (error) {
-    // Keychain 或 JSON 异常不得回显配置正文，仅记录固定旧配置分类。
+    // Keychain API 异常表示安全存储暂不可用，不得误导用户覆盖或删除旧键。
     console.log("旧运行配置读取失败");
     return { status: "unavailable" };
   }
+
+  let parsed;
+  try {
+    // Keychain 正常契约返回字符串；非字符串属于旧内容无效，不能交给 JSON.parse 隐式转换。
+    if (typeof serializedConfig !== "string") {
+      throw new Error("legacy-config-not-string");
+    }
+    parsed = JSON.parse(serializedConfig);
+  }
+  catch (error) {
+    // JSON 或类型错误是用户可明确修复的 legacy invalid；日志不包含旧配置正文。
+    console.log("旧运行配置内容无效");
+    return { status: "invalid", source: "legacy" };
+  }
+
+  const businessResult = validateBusinessConfig(parsed);
+  // 旧数据必须明确是 schema v1 且业务字段有效；来源标记让 App 选择专用修复事务。
+  if (!parsed || parsed.schemaVersion !== 1 || !businessResult.ok) {
+    console.log("旧运行配置内容无效");
+    return { status: "invalid", source: "legacy" };
+  }
+  return { status: "legacyMigrationRequired", value: businessResult.value };
 }
 
 /**
@@ -313,14 +331,19 @@ async function restoreBackupConfigInApp(storage, invalidConfigInstalled) {
     const backupResult = readAndValidateICloudConfig(storage.fm, storage.backupPath);
     // 备份未通过完整读取校验时不得删除现有正式文件或移动任何工件。
     if (backupResult.status !== "ready") {
-      return backupResult;
+      return backupResult.status === "invalid"
+        ? { status: "invalid", source: "iCloud" }
+        : backupResult;
     }
     // 只有已验证备份可接管时才删除无效正式文件，避免恢复失败扩大数据损失。
     if (invalidConfigInstalled) {
       storage.fm.remove(storage.configPath);
     }
     storage.fm.move(storage.backupPath, storage.configPath);
-    return readAndValidateICloudConfig(storage.fm, storage.configPath);
+    const restoredResult = readAndValidateICloudConfig(storage.fm, storage.configPath);
+    return restoredResult.status === "invalid"
+      ? { status: "invalid", source: "iCloud" }
+      : restoredResult;
   }
   catch (error) {
     // 文件系统异常不携带到日志或 UI，调用方只获得暂不可用状态。
@@ -364,7 +387,9 @@ async function loadRuntimeConfig(runsInApp) {
         ? await restoreBackupConfigInApp(storage, true)
         : { status: "unavailable" };
     }
-    return configResult;
+    return configResult.status === "invalid"
+      ? { status: "invalid", source: "iCloud" }
+      : configResult;
   }
   catch (error) {
     // 任何 iCloud API 异常都只记录固定分类，错误对象可能包含路径或文件内容。
@@ -427,12 +452,12 @@ function tryRemoveConfigArtifact(fm, filePath) {
 /**
  * 在写入新 pending 前收敛上次中断留下的事务工件。
  *
- * 使用场景：`saveRuntimeConfig()` 每次保存的第一步。入参为同一 iCloud 存储集合与是否
- * 进入用户明确授权的无效工件替换模式；返回 Promise<void>。方法创建固定目录、严格清理
- * 旧 pending。普通模式继续收敛或恢复既有事务工件；显式修复模式延后处理正式和 backup，
- * 保证候选 pending 完整校验前不删除任何无效旧工件。
+ * 使用场景：`saveRuntimeConfig()` 每次保存的第一步。入参为同一 iCloud 存储集合与修复
+ * 模式；返回 Promise<void>。方法创建固定目录、严格清理旧 pending。普通模式继续收敛或
+ * 恢复既有事务工件；`iCloudInvalid` 与 `legacyInvalid` 都把来源约束延后到 pending 完整
+ * 校验之后，防止候选未验证时删除无效文件或错误套用其他来源的修复规则。
  */
-async function prepareICloudSave(storage, replaceInvalidArtifacts) {
+async function prepareICloudSave(storage, repairMode) {
   // 配置目录只在 App 明确保存时创建，Widget 读取路径永不创建目录。
   if (!storage.fm.isDirectory(storage.directoryPath)) {
     storage.fm.createDirectory(storage.directoryPath);
@@ -443,7 +468,7 @@ async function prepareICloudSave(storage, replaceInvalidArtifacts) {
   }
 
   // 显式修复必须先写入并复读 pending；现有工件的验证与删除由后置边界统一完成。
-  if (replaceInvalidArtifacts) {
+  if (repairMode) {
     return;
   }
 
@@ -474,6 +499,22 @@ async function prepareICloudSave(storage, replaceInvalidArtifacts) {
     if (restoreResult.status !== "ready") {
       throw new Error("backup-restore-failed");
     }
+  }
+}
+
+/**
+ * 在 pending 已完整校验后重新确认 legacy 修复仍没有任何 iCloud 配置工件。
+ *
+ * 使用场景：旧 Keychain 内容无效时，初次加载已确认正式与 backup 缺失；用户填写表单期间
+ * iCloud 仍可能同步出文件。入参为同一 iCloud 存储集合；无正常返回值。两个固定工件都
+ * 缺失时允许继续安装候选，任一存在都抛固定内部错误并保留现有文件、旧键及未安装候选。
+ */
+function verifyICloudArtifactsMissingForLegacyRepair(storage) {
+  const configExists = storage.fm.fileExists(storage.configPath);
+  const backupExists = storage.fm.fileExists(storage.backupPath);
+  // legacy 修复没有替换 iCloud 工件的授权；发现任一文件都必须停止而不能判断或删除内容。
+  if (configExists || backupExists) {
+    throw new Error("legacy-repair-artifacts-appeared");
   }
 }
 
@@ -523,15 +564,15 @@ async function removeInvalidConfigArtifactsForRepair(storage) {
 /**
  * 通过 pending/backup 双标志事务保存 iCloud 运行配置。
  *
- * 使用场景：App 表单或旧 Keychain 迁移经用户确认后调用。入参为任意业务配置和是否允许
- * 替换已确认无效工件的显式修复标记；省略时为 false，只有 invalid 菜单的“修复配置”传
- * true。成功返回 `{ ok: true, value }`，value 是完成两次写后读校验的五字段 envelope；
- * 校验或任何 iCloud 步骤失败返回固定脱敏结果。`backupCreatedByTransaction` 仅在正式成功
- * 移到 backup 后置位，
+ * 使用场景：App 表单或旧 Keychain 迁移经用户确认后调用。入参为任意业务配置和可选修复
+ * 来源模式；普通保存省略，iCloud 无效工件传 `iCloudInvalid`，旧 Keychain 无效且 iCloud
+ * 工件缺失传 `legacyInvalid`。成功返回 `{ ok: true, value }`，value 是完成两次写后读校验
+ * 的五字段 envelope；校验或任何 iCloud 步骤失败返回固定脱敏结果。
+ * `backupCreatedByTransaction` 仅在正式成功移到 backup 后置位，
  * `candidateInstalled` 仅在 pending 成功安装后置位，失败清理严格依据本次事务状态，绝不
  * 误删未安装候选前的正式文件。方法不使用 Node API，不访问 Keychain。
  */
-async function saveRuntimeConfig(input, replaceInvalidArtifacts = false) {
+async function saveRuntimeConfig(input, repairMode = null) {
   const businessResult = validateBusinessConfig(input);
   // 业务校验失败时不创建目录、不写任何工件，保留现有配置逐字不变。
   if (!businessResult.ok) {
@@ -555,7 +596,7 @@ async function saveRuntimeConfig(input, replaceInvalidArtifacts = false) {
   let backupCreatedByTransaction = false;
   let candidateInstalled = false;
   try {
-    await prepareICloudSave(storage, replaceInvalidArtifacts);
+    await prepareICloudSave(storage, repairMode);
     storage.fm.writeString(storage.pendingPath, JSON.stringify(candidate));
     const pendingResult = readAndValidateICloudConfig(storage.fm, storage.pendingPath);
     // pending 必须内容有效且逐字段等于内存候选，任何差异都停止在安装之前。
@@ -564,8 +605,12 @@ async function saveRuntimeConfig(input, replaceInvalidArtifacts = false) {
     }
 
     // 只有用户明确修复且 pending 已逐字段匹配时，才验证并移除现有无效工件。
-    if (replaceInvalidArtifacts) {
+    if (repairMode === "iCloudInvalid") {
       await removeInvalidConfigArtifactsForRepair(storage);
+    }
+    // legacy 来源没有可替换的 iCloud 工件；pending 验证后必须重新确认两者仍缺失。
+    else if (repairMode === "legacyInvalid") {
+      verifyICloudArtifactsMissingForLegacyRepair(storage);
     }
 
     // 只有正式确实存在时才创建本次 backup；move 成功后立即置位供 catch 精确恢复。
@@ -628,13 +673,12 @@ async function presentMessage(title, message) {
  * 循环展示单脚本运行配置表单，并在用户确认后校验和保存完整 schema v1 配置。
  *
  * 使用场景：用户从创建、管理或显式修复入口进入配置表单时调用。入参 `initialConfig`
- * 为已验证配置或 null；`replaceInvalidArtifacts` 只允许 invalid 菜单明确修复时为 true；
- * 成功保存返回标准化配置，取消、保存失败返回 null。文本框固定按高德 Key、TeslaMateApi
- * URL、TeslaMate Web URL 排列，Key
- * 使用安全文本框；校验失败会保留本次原始输入重试，所有状态提示均使用固定脱敏
- * 文案。Alert 或 iCloud 事务之外的意外异常原样抛出。
+ * 为已验证配置或 null；`repairMode` 为 null、`iCloudInvalid` 或 `legacyInvalid`，仅由对应
+ * App 菜单传入；成功保存返回标准化配置，取消、保存失败返回 null。文本框固定按高德 Key、
+ * TeslaMateApi URL、TeslaMate Web URL 排列，Key 使用安全文本框；校验失败会保留本次原始
+ * 输入重试，所有状态提示均使用固定脱敏文案。Alert 或 iCloud 事务之外的意外异常原样抛出。
  */
-async function presentConfigForm(initialConfig, replaceInvalidArtifacts = false) {
+async function presentConfigForm(initialConfig, repairMode = null) {
   let formValues;
   // 已配置入口预填当前标准化值，首次配置入口使用空值；分支只处理可信配置或 null。
   if (initialConfig) {
@@ -683,11 +727,30 @@ async function presentConfigForm(initialConfig, replaceInvalidArtifacts = false)
       continue;
     }
 
-    const saveResult = await saveRuntimeConfig(validationResult.value, replaceInvalidArtifacts);
+    const saveResult = await saveRuntimeConfig(validationResult.value, repairMode);
     // 候选已通过校验，此处失败只代表 iCloud 事务失败；旧值由双标志算法尽力恢复。
     if (!saveResult.ok) {
       await presentMessage("保存失败", "无法保存配置，请稍后重试");
       return null;
+    }
+
+    // legacy invalid 修复必须重新经过正式文件加载门禁，逐字段一致后才有权删除旧键。
+    if (repairMode === "legacyInvalid") {
+      const verifiedResult = await loadRuntimeConfig(true);
+      if (verifiedResult.status !== "ready" ||
+        !configsEqual(verifiedResult.value, saveResult.value)) {
+        await presentMessage("修复失败", "无法验证 iCloud 配置，请稍后重试");
+        return null;
+      }
+      try {
+        Keychain.remove(RUNTIME_CONFIG_KEY);
+      }
+      catch (error) {
+        // 正式文件已验证有效时不回滚；旧键虽保留，但后续 ready 路径不会再访问它。
+        console.log("旧运行配置清理失败");
+        await presentMessage("修复失败", "iCloud 配置已保存，但旧配置清理失败");
+        return null;
+      }
     }
 
     await presentMessage("保存成功", "已保存到 iCloud Drive，将由系统同步到其他设备");
@@ -793,9 +856,9 @@ async function presentUnavailableConfigMenu() {
 }
 
 /**
- * 展示 iCloud 正式配置内容无效时的 App 修复菜单。
+ * 展示 iCloud 文件或旧 Keychain 内容无效时的 App 修复菜单。
  *
- * 使用场景：正式文件已读取但 JSON、schema、时间或业务字段非法且没有可恢复备份。
+ * 使用场景：iCloud 正式/backup 内容无效，或两者缺失且旧 Keychain 内容无效。
  * 无入参；动作固定为“重试读取 / 修复配置 / 取消”。返回 `retry`、`repair` 或 null，
  * 调用方通过动作字符串控制循环；本方法不读取、不删除也不覆盖配置文件。
  */
@@ -896,11 +959,17 @@ async function presentNonReadyConfigInApp(initialResult) {
       currentResult = await loadRuntimeConfig(true);
       continue;
     }
-    // invalid 只有明确修复才打开空表单；重试仅重新加载并回到状态循环。
+    // invalid 只有明确修复才打开空表单；来源决定事务能替换无效 iCloud 工件，还是只能
+    // 在正式/backup 仍缺失时从 legacy 创建。重试仅重新加载并回到状态循环。
     if (currentResult.status === "invalid") {
       const invalidAction = await presentInvalidConfigMenu();
       if (invalidAction === "repair") {
-        await presentConfigForm(null, true);
+        if (currentResult.source === "iCloud") {
+          await presentConfigForm(null, "iCloudInvalid");
+        }
+        else if (currentResult.source === "legacy") {
+          await presentConfigForm(null, "legacyInvalid");
+        }
         return;
       }
       if (invalidAction !== "retry") {

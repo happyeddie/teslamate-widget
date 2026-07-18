@@ -91,6 +91,39 @@ function cleanupRuntimeDirectories(t, result) {
   });
 }
 
+/**
+ * 静态验证成功 runtime 结果只能通过统一 helper 清理 local 与 iCloud 两个临时根。
+ *
+ * 使用场景：`runScriptableScript()` 即使测试未显式传 iCloud fixture，也会创建默认 iCloud
+ * documents；只删除 local 会持续泄漏临时目录。无业务入参；测试读取当前测试文件，要求
+ * `fs.rmSync(result.*DocumentsDirectory)` 各只在 `cleanupRuntimeDirectories()` 中出现一次。
+ */
+test("所有 runtime 结果统一清理 local 与 iCloud 临时目录", () => {
+  const source = fs.readFileSync(__filename, "utf8");
+  const localCleanupCalls = source.match(/fs\.rmSync\(result\.documentsDirectory/g) || [];
+  const iCloudCleanupCalls = source.match(/fs\.rmSync\(result\.iCloudDocumentsDirectory/g) || [];
+  const readyFixtureTestBlocks = source.split("\ntest(")
+    .filter((testBlock) => testBlock.includes("readyICloudFixture()"));
+  const runtimeTestBlocks = source.split("\ntest(")
+    .filter((testBlock) => testBlock.includes("runScriptableScript("));
+
+  assert.equal(localCleanupCalls.length, 1, "仍存在绕过统一 helper 的 local runtime 清理");
+  assert.equal(iCloudCleanupCalls.length, 1, "仍存在绕过统一 helper 的 iCloud runtime 清理");
+  // 每个使用 ready fixture 的测试块都必须显式注册统一清理，覆盖自定义 local 根场景。
+  for (const testBlock of readyFixtureTestBlocks) {
+    assert.equal(testBlock.includes("cleanupRuntimeDirectories("), true,
+      "readyICloudFixture 测试缺少统一 runtime 目录清理");
+  }
+  // 抛错前无法取得 result 的测试必须预先创建并注册两个根；其余测试统一从 result 清理。
+  for (const testBlock of runtimeTestBlocks) {
+    const cleansSuccessfulResult = testBlock.includes("cleanupRuntimeDirectories(");
+    const preallocatesFailureRoots = testBlock.includes("createRuntimeDocumentsDirectory(") &&
+      testBlock.includes("createRuntimeICloudDocumentsDirectory(");
+    assert.equal(cleansSuccessfulResult || preallocatesFailureRoots, true,
+      "runtime 测试既未统一清理结果，也未预分配两个故障目录");
+  }
+});
+
 function deepMerge(target, source) {
   for (const [key, value] of Object.entries(source)) {
     if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -504,7 +537,7 @@ test("中号桌面 widget 可以用在线车辆数据完成渲染并写入缓存
     runsInWidget: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   assert.equal(result.script.completed, true);
   assert.equal(result.widget.presented, "medium");
@@ -530,7 +563,7 @@ test("车 ID 2 使用配置请求、车辆链接和独立缓存", async (t) => {
     runsInWidget: true,
     widgetParameter: "dark,2"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   const cacheRoot = path.join(result.documentsDirectory, "tesla");
   const vehicleName = collectByType(result.widget, "text")
@@ -634,7 +667,7 @@ test("中号桌面 widget 地图图片填满右侧容器", async (t) => {
     runsInWidget: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   const maps = mapImages(result.widget);
   assert.equal(maps.length, 1);
@@ -658,7 +691,7 @@ test("充电状态显示充电功率、目标电量，并使用 30 秒刷新窗�
     runsInWidget: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   const refreshAt = new Date(result.widget.refreshAfterDate).getTime();
   assert.ok(refreshAt - startedAt >= 29_000);
@@ -680,7 +713,7 @@ test("行驶状态使用 10 秒刷新窗口并显示速度", async (t) => {
     runsInWidget: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   const refreshAt = new Date(result.widget.refreshAfterDate).getTime();
   assert.ok(refreshAt - startedAt >= 9_000);
@@ -701,7 +734,7 @@ test("锁屏 accessory widget 可以完成圆形电量图渲染", async (t) => {
     widgetFamily: "accessoryCircular",
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   assert.equal(result.script.completed, true);
   assert.equal(result.widget.presented, "small");
@@ -723,7 +756,7 @@ test("App 操作菜单选择打开 TeslaMate 时展示当前车辆 WebView", asy
     runsInApp: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   assert.deepEqual(result.alerts[0], {
     actions: ["打开 TeslaMate", "管理配置"],
@@ -754,7 +787,7 @@ test("App 打开 TeslaMate 时等待 WebView 展示完成再结束脚本", async
     runsInApp: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   assert.deepEqual(result.lifecycle, [
     "webview.present:start",
@@ -780,7 +813,7 @@ test("runtime 可稳定识别未等待的 WebView 展示", async (t) => {
       Script.complete();
     `)
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   assert.deepEqual(result.lifecycle, ["webview.present:start", "script.complete"]);
   await new Promise((resolve) => setImmediate(resolve));
@@ -810,9 +843,7 @@ test("WebView 失败不会泄露完整 URL 或 Key", async (t) => {
         widgetParameter: "1"
       });
       const result = error.runtimeResult;
-      subtest.after(() =>
-        fs.rmSync(result.documentsDirectory, { recursive: true, force: true })
-      );
+      cleanupRuntimeDirectories(subtest, result);
 
       assert.equal(error.message, "TeslaMate 页面打开失败");
       assert.ok(result.logs.includes("TeslaMate 页面打开失败"));
@@ -1139,6 +1170,146 @@ test("App 显式修复安装候选失败时不恢复无效备份", async (t) => 
     "https://move-failed-api.example.test",
     "https://move-failed-web.example.test"
   ]);
+});
+
+/**
+ * 验证旧 Keychain 内容无效时使用可辨识的 legacy 修复来源，并能创建新的 iCloud 正式配置。
+ *
+ * 使用场景：正式与 backup 均缺失，但旧键可能是 schema 不兼容、业务字段无效或 JSON 损坏。
+ * 入参为 node:test 上下文；无返回值。三种来源都必须进入 invalid 菜单；用户明确修复后先
+ * 完整验证 pending、重新确认 iCloud 工件仍缺失、安装并重读正式文件，最后才删除旧键。
+ */
+test("App 可显式修复 schema 字段或 JSON 无效的旧 Keychain", async (t) => {
+  const legacyInvalidCases = [
+    { name: "schema 无效", value: runtimeConfigJson({ schemaVersion: 2 }) },
+    { name: "业务字段无效", value: runtimeConfigJson({ amapApiKey: "   " }) },
+    { name: "JSON 无效", value: "{" }
+  ];
+
+  for (const legacyInvalidCase of legacyInvalidCases) {
+    await t.test(legacyInvalidCase.name, async (subtest) => {
+      const result = await runScriptableScript({
+        alertResponses: [
+          { index: 1 },
+          {
+            index: 0,
+            textFields: [
+              " repaired-legacy-key ",
+              "https://repaired-legacy-api.example.test///",
+              "https://repaired-legacy-web.example.test///"
+            ]
+          },
+          { index: 0 }
+        ],
+        keychainValues: { [RUNTIME_CONFIG_KEY]: legacyInvalidCase.value },
+        runsInApp: true
+      });
+      cleanupRuntimeDirectories(subtest, result);
+
+      assert.deepEqual(result.alerts[0].actions, ["重试读取", "修复配置"]);
+      assert.equal(result.alerts.at(-1).title, "保存成功");
+      const savedConfig = readICloudConfig(result);
+      assert.equal(savedConfig.amapApiKey, "repaired-legacy-key");
+      assert.equal(savedConfig.teslaMateApiBaseUrl, "https://repaired-legacy-api.example.test");
+      assert.equal(savedConfig.teslaMateWebUrl, "https://repaired-legacy-web.example.test");
+      assert.equal(Object.hasOwn(result.keychain, RUNTIME_CONFIG_KEY), false);
+      assert.equal(result.iCloudFileObservations.downloadCalls, 1);
+      assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH)), false);
+      assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+      assert.equal(result.requests.length, 0);
+      assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+    });
+  }
+});
+
+/**
+ * 验证 legacy invalid 修复安装候选失败时保留旧键，且候选不进入业务链。
+ *
+ * 使用场景：pending 已校验且 iCloud 正式/backup 仍缺失，但 pending 移动为正式文件失败。
+ * 入参为 node:test 上下文；无返回值。测试要求确实尝试一次安装，随后清理 pending、保留
+ * 旧无效 Keychain，并以固定失败提示安全结束。
+ */
+test("App 修复旧 Keychain 时安装候选失败会保留旧键", async (t) => {
+  const invalidLegacyJson = runtimeConfigJson({ schemaVersion: 2 });
+  const result = await runScriptableScript({
+    alertResponses: [
+      { index: 1 },
+      {
+        index: 0,
+        textFields: [
+          "legacy-install-failure-key",
+          "https://legacy-install-failure-api.example.test",
+          "https://legacy-install-failure-web.example.test"
+        ]
+      },
+      { index: 0 }
+    ],
+    iCloudFailures: { moveAtCall: 1 },
+    keychainValues: { [RUNTIME_CONFIG_KEY]: invalidLegacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.alerts.at(-1).title, "保存失败");
+  assert.equal(result.iCloudFileObservations.moveCalls, 1);
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], invalidLegacyJson);
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), false);
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+});
+
+/**
+ * 验证 legacy invalid 修复在正式文件复读成功后才删除旧键，删除失败不回滚有效 iCloud。
+ *
+ * 使用场景：Keychain.remove 可能暂时失败。入参为 node:test 上下文；无返回值。第一次运行
+ * 必须保留已验证正式文件和旧键并显示固定修复失败；第二次运行注入 contains 故障，仍只靠
+ * 正式 iCloud 进入 ready，证明旧键已经不可达且不会再次阻断运行。
+ */
+test("App 修复旧 Keychain 后删除旧键失败会保留有效 iCloud", async (t) => {
+  const invalidLegacyJson = "{invalid-legacy-json";
+  const firstResult = await runScriptableScript({
+    alertResponses: [
+      { index: 1 },
+      {
+        index: 0,
+        textFields: [
+          "legacy-remove-failure-key",
+          "https://legacy-remove-failure-api.example.test",
+          "https://legacy-remove-failure-web.example.test"
+        ]
+      },
+      { index: 0 }
+    ],
+    keychainFailures: { remove: true },
+    keychainValues: { [RUNTIME_CONFIG_KEY]: invalidLegacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, firstResult);
+
+  const installedConfig = fs.readFileSync(
+    path.join(firstResult.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH),
+    "utf8"
+  );
+  assert.equal(firstResult.alerts.at(-1).title, "修复失败");
+  assert.equal(firstResult.keychain[RUNTIME_CONFIG_KEY], invalidLegacyJson);
+  assert.equal(firstResult.iCloudFileObservations.downloadCalls, 1);
+  assert.equal(firstResult.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(firstResult.documentsDirectory, "tesla")), false);
+
+  const secondResult = await runScriptableScript({
+    alertResponses: [{ index: -1 }],
+    iCloudFiles: { [ICLOUD_CONFIG_PATH]: installedConfig },
+    iCloudDownloadedFiles: [ICLOUD_CONFIG_PATH],
+    keychainFailures: { contains: new Error("unreachable-invalid-legacy-sentinel") },
+    keychainValues: { [RUNTIME_CONFIG_KEY]: invalidLegacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, secondResult);
+
+  assert.equal(secondResult.alerts[0].title, "TeslaMate Widget");
+  assert.equal(secondResult.logs.some((line) =>
+    line.includes("unreachable-invalid-legacy-sentinel")), false);
 });
 
 /**
@@ -1697,10 +1868,7 @@ test("Keychain 在单次 runtime 内保存变更并返回最终克隆", async (t
       Script.complete();
     `)
   });
-  t.after(() => {
-    // 成功路径可从结果取得目录，测试结束时释放其文件缓存。
-    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-  });
+  cleanupRuntimeDirectories(t, result);
 
   assert.deepEqual(result.keychain, { added: "new value", existing: "initial" });
 });
@@ -1727,11 +1895,7 @@ test("runtime 将本地缓存与 iCloud 配置隔离并提供脱敏文件观测"
       Script.complete();
     `)
   });
-  t.after(() => {
-    // 两个 runtime 根目录都由本测试创建，成功结束后必须独立释放。
-    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-    fs.rmSync(result.iCloudDocumentsDirectory, { recursive: true, force: true });
-  });
+  cleanupRuntimeDirectories(t, result);
 
   assert.equal(result.iCloudFileObservations.downloadCalls, 1);
   assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-config-body"), false);
@@ -1986,6 +2150,7 @@ test("iCloud FileManager 支持脱敏故障注入与分阶段移动失败", asyn
  */
 test("Keychain 对四类配置失败操作抛出固定测试错误", async (t) => {
   const documentsDirectory = createRuntimeDocumentsDirectory(t);
+  const iCloudDocumentsDirectory = createRuntimeICloudDocumentsDirectory(t);
   // 每个临时脚本只调用一个 API，以验证对应 keychainFailures 布尔开关的独立语义。
   const failureCases = [
     { operation: "contains", source: "Keychain.contains(\"configured\");" },
@@ -1999,6 +2164,7 @@ test("Keychain 对四类配置失败操作抛出固定测试错误", async (t) =
     await assert.rejects(
       runScriptableScript({
         documentsDirectory,
+        iCloudDocumentsDirectory,
         keychainFailures: { [failureCase.operation]: true },
         scriptPath: writeRuntimeTestScript(t, failureCase.source)
       }),
@@ -2016,6 +2182,7 @@ test("Keychain 对四类配置失败操作抛出固定测试错误", async (t) =
  */
 test("Keychain 故障注入支持 contains、get、set 自定义 Error", async (t) => {
   const documentsDirectory = createRuntimeDocumentsDirectory(t);
+  const iCloudDocumentsDirectory = createRuntimeICloudDocumentsDirectory(t);
   const failureCases = [
     { operation: "contains", source: "Keychain.contains(\"configured\");" },
     { operation: "get", source: "Keychain.get(\"configured\");" },
@@ -2030,6 +2197,7 @@ test("Keychain 故障注入支持 contains、get、set 自定义 Error", async (
     await assert.rejects(
       runScriptableScript({
         documentsDirectory,
+        iCloudDocumentsDirectory,
         keychainFailures: { [failureCase.operation]: customError },
         keychainValues: { configured: "value" },
         scriptPath: writeRuntimeTestScript(t, failureCase.source)
@@ -2048,6 +2216,7 @@ test("Keychain 故障注入支持 contains、get、set 自定义 Error", async (
  */
 test("图片请求故障注入支持自定义 Error 并兼容默认错误", async (t) => {
   const requestUrl = `https://maps.example.test/static?key=${SENTINEL_AMAP_API_KEY}`;
+  const iCloudDocumentsDirectory = createRuntimeICloudDocumentsDirectory(t);
   const scriptPath = writeRuntimeTestScript(t, `
     const request = new Request("${requestUrl}");
     await request.loadImage();
@@ -2056,6 +2225,7 @@ test("图片请求故障注入支持自定义 Error 并兼容默认错误", asyn
   await assert.rejects(
     runScriptableScript({
       documentsDirectory: createRuntimeDocumentsDirectory(t),
+      iCloudDocumentsDirectory,
       failImages: true,
       scriptPath
     }),
@@ -2066,6 +2236,7 @@ test("图片请求故障注入支持自定义 Error 并兼容默认错误", asyn
   await assert.rejects(
     runScriptableScript({
       documentsDirectory: createRuntimeDocumentsDirectory(t),
+      iCloudDocumentsDirectory,
       failImages: customError,
       scriptPath
     }),
@@ -2083,6 +2254,7 @@ test("Keychain 读取缺失键时抛出固定错误", async (t) => {
   await assert.rejects(
     runScriptableScript({
       documentsDirectory: createRuntimeDocumentsDirectory(t),
+      iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(t),
       scriptPath: writeRuntimeTestScript(t, "Keychain.get(\"missing\");")
     }),
     new Error("Missing keychain value")
@@ -2106,10 +2278,7 @@ test("Alert 对大于等于动作数量的响应下标返回取消", async (t) =
       Script.complete();
     `)
   });
-  t.after(() => {
-    // 越界响应正常被转换为取消后，释放成功运行产生的 documents 目录。
-    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-  });
+  cleanupRuntimeDirectories(t, result);
 
   assert.equal(result.script.completed, true);
 });
@@ -2145,10 +2314,7 @@ test("Alert 记录展示信息、按顺序消费响应并返回文本框输入",
       Script.complete();
     `)
   });
-  t.after(() => {
-    // 断言展示快照后清理成功运行产生的 documents 目录。
-    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-  });
+  cleanupRuntimeDirectories(t, result);
 
   assert.deepEqual(result.alerts, [
     {
@@ -2180,6 +2346,7 @@ test("Alert 响应不足时明确报错，避免静默选择默认动作", async
   await assert.rejects(
     runScriptableScript({
       documentsDirectory: createRuntimeDocumentsDirectory(t),
+      iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(t),
       scriptPath: writeRuntimeTestScript(t, `
         const alert = new Alert();
         // 未传入 alertResponses 时，展示必须抛出固定错误而非选择任意动作。
@@ -2208,6 +2375,7 @@ test("TeslaMate API 失败时可以读取已有车辆缓存继续渲染", async 
     runsInWidget: true,
     widgetParameter: "1"
   });
+  cleanupRuntimeDirectories(t, result);
 
   assert.equal(result.script.completed, true);
   assert.equal(result.widget.presented, "medium");
@@ -2242,6 +2410,7 @@ test("TeslaMate 请求失败日志不泄露 Key 或完整 URL", async (t) => {
     runsInWidget: true,
     widgetParameter: "2"
   });
+  cleanupRuntimeDirectories(t, result);
 
   assert.ok(result.logs.includes("车辆状态请求失败，尝试读取缓存"));
   assert.ok(textValues(result.widget).some((text) => text.includes("Cached Car 2")));
@@ -2271,7 +2440,7 @@ test("无车辆缓存时 TeslaMate 请求失败抛出固定脱敏错误", async 
     widgetParameter: "1"
   });
   const result = error.runtimeResult;
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   assert.equal(error.message, "车辆状态加载失败");
   assert.deepEqual(result.logs, ["车辆状态请求失败，尝试读取缓存"]);
@@ -2299,7 +2468,7 @@ test("高德地图图片失败日志不泄露 Key 或完整 URL", async (t) => {
     runsInWidget: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   const amapRequest = result.requests.find((request) =>
     request.url.startsWith("https://restapi.amap.com/v3/staticmap?")
@@ -2333,7 +2502,7 @@ test("地理编码失败日志不泄露异常详情", async (t) => {
     runsInWidget: true,
     widgetParameter: "1"
   });
-  t.after(() => fs.rmSync(result.documentsDirectory, { recursive: true, force: true }));
+  cleanupRuntimeDirectories(t, result);
 
   assert.ok(result.logs.includes("地理编码失败"));
   assert.ok(textValues(result.widget).some((text) => text.includes("未知位置")));
@@ -2363,6 +2532,7 @@ test("损坏车辆缓存读取失败时记录固定脱敏日志", async (t) => {
     runsInWidget: true,
     widgetParameter: "2"
   });
+  cleanupRuntimeDirectories(t, result);
 
   assert.ok(result.logs.includes("车辆缓存读取失败"));
   assert.equal(result.logs.some((line) => line.includes("SyntaxError")), false);
