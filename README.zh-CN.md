@@ -57,7 +57,7 @@
 
 ### iCloud 同步、迁移与安全边界
 
-当各设备登录同一 Apple Account、开启 iCloud Drive 且允许 Scriptable 使用 iCloud 时，配置会通过 iCloud Drive 共享。Apple 说明 iCloud Drive 的变更会出现在使用该账户的设备上；但脚本无法观测或承诺系统何时已经上传或传播某次修改，请等待系统同步完成后再依赖另一台设备。
+当各设备登录同一 Apple Account、开启 iCloud Drive 且允许 Scriptable 使用 iCloud 时，配置会通过 iCloud Drive 共享。Apple 说明 [iCloud Drive 的变更会自动出现在你的设备上](https://support.apple.com/guide/icloud/what-you-can-do-with-icloud-drive-mm19ef899373/1.0/icloud/1.0)；但脚本无法观测或承诺系统何时已经上传或传播某次修改，请等待系统同步完成后再依赖另一台设备。
 
 如果从旧的仅 Keychain 版本升级，请在**原来已经配置的旧设备**中打开 Scriptable App 运行新脚本，查看迁移提示并在 App 内确认。只有迁移写入并校验成功后，旧 Keychain 项才会删除；不要先手动删除旧项。Widget 不会迁移配置，也不会显示迁移表单。
 
@@ -65,7 +65,7 @@
 
 只支持单设备依次修改配置，不支持并发编辑：项目没有合并界面；依次保存后，各设备只读取 iCloud 当前可见的版本。这是使用边界，并不表示脚本能够确认同步已经完成。
 
-Apple 的[普通数据保护](https://support.apple.com/en-us/102651)会在传输和静态存储时加密 iCloud 数据，恢复密钥由 Apple 数据中心保管；可选的[高级数据保护](https://support.apple.com/en-us/102651)会让 iCloud Drive 使用端到端加密，密钥只在受信任设备上，并有更严格的恢复要求。高级数据保护不是本组件的前置条件；无论采用哪种设置，登录到不受信任设备都会带来配置泄露风险。请参阅 Apple 的 [iCloud Drive 设置要求](https://support.apple.com/guide/icloud/set-up-icloud-drive-mm203b05aec8/icloud) 与 Scriptable 的 [iCloud FileManager 文档](https://docs.scriptable.app/filemanager/)。
+Apple 的[普通数据保护](https://support.apple.com/en-us/102651)会在传输和静态存储时加密 iCloud 数据，加密密钥由 Apple 数据中心保管；可选的[高级数据保护](https://support.apple.com/en-us/102651)会让 iCloud Drive 使用端到端加密，密钥只在受信任设备上，并有更严格的恢复要求。高级数据保护不是本组件的前置条件；无论采用哪种设置，都不要在不受信任设备上登录 Apple Account。请参阅 Apple 的 [iCloud Drive 设置要求](https://support.apple.com/guide/icloud/set-up-icloud-drive-mm203b05aec8/icloud) 与 Scriptable 的 [iCloud FileManager 文档](https://docs.scriptable.app/filemanager/)。
 
 ## 本地自动化测试
 

@@ -57,7 +57,7 @@ Cache files are stored in the `tesla/` folder under Scriptable documents.
 
 ### iCloud synchronization, migration, and security
 
-The configuration is shared through iCloud Drive when every device is signed in to the same Apple Account, has iCloud Drive enabled, and allows Scriptable to use iCloud. Apple documents that iCloud Drive changes are made available on devices using that account, but this script cannot observe or promise when the system has uploaded or propagated a change. Let iCloud finish before relying on another device.
+The configuration is shared through iCloud Drive when every device is signed in to the same Apple Account, has iCloud Drive enabled, and allows Scriptable to use iCloud. Apple documents that [iCloud Drive changes automatically appear on your devices](https://support.apple.com/guide/icloud/what-you-can-do-with-icloud-drive-mm19ef899373/1.0/icloud/1.0), but this script cannot observe or promise when the system has uploaded or propagated a change. Let iCloud finish before relying on another device.
 
 If you upgrade from a Keychain-only version, run the new script **in the Scriptable app on the old configured device**. Review the migration prompt and confirm it there. Only a confirmed, validated migration removes the old Keychain entry. Do not remove the old entry yourself first. A widget never migrates configuration or shows a migration form.
 
@@ -65,7 +65,7 @@ On a second device using the same Apple Account, install the script and run it o
 
 Edit configuration on one device at a time. Concurrent edits are unsupported: there is no merge UI, and after sequential edits each device reads the version currently visible through iCloud. This is a convenience and safety boundary, not a synchronization-completion guarantee.
 
-Apple's [standard data protection](https://support.apple.com/en-us/102651) encrypts iCloud data in transit and at rest, with recovery keys held by Apple. [Advanced Data Protection](https://support.apple.com/en-us/102651) is optional and makes iCloud Drive end-to-end encrypted with keys held by trusted devices; it has stronger recovery requirements. It is not required for this widget, and neither setting makes configuration safe on an untrusted signed-in device. See Apple's [iCloud Drive setup requirements](https://support.apple.com/guide/icloud/set-up-icloud-drive-mm203b05aec8/icloud) and Scriptable's [iCloud FileManager documentation](https://docs.scriptable.app/filemanager/) for platform behavior.
+Apple's [standard data protection](https://support.apple.com/en-us/102651) encrypts iCloud data in transit and at rest, with encryption keys secured in Apple data centers. [Advanced Data Protection](https://support.apple.com/en-us/102651) is optional and makes iCloud Drive end-to-end encrypted with keys held by trusted devices; it has stronger recovery requirements. It is not required for this widget. Do not sign in to your Apple Account on an untrusted device, regardless of which protection setting you use. See Apple's [iCloud Drive setup requirements](https://support.apple.com/guide/icloud/set-up-icloud-drive-mm203b05aec8/icloud) and Scriptable's [iCloud FileManager documentation](https://docs.scriptable.app/filemanager/) for platform behavior.
 
 ## Local Automated Tests
 
