@@ -593,7 +593,9 @@ function serialize(value) {
  * widget、缓存及配置流程的业务结果。入参 `options` 可覆盖脚本路径、documents
  * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures`、
  * `iCloudFiles`、`iCloudDownloadedFiles`、`iCloudFailures`、`iCloudReadOverrides`、
- * `failImages` 和 `alertResponses`；未传入的可选项使用测试安全的默认值。
+ * `failImages` 和 `alertResponses`；`keychainValues` 与 `keychainFailures` 仅为旧配置
+ * 一次性迁移、日常路径不触碰 Keychain 的哨兵，以及 runtime API 兼容测试保留。未传入
+ * 的可选项使用测试安全的默认值。
  * `keychainFailures.<operation>`、`failImages` 与 `webViewFailures.<operation>` 可传布尔
  * 值或 Error：true 使用向后兼容的固定 Mock Error，Error 实例则原样抛出，供安全测试
  * 携带虚构敏感信息。成功时返回 documents 路径、请求/日志/Widget/WebView 快照、Keychain
@@ -625,8 +627,9 @@ async function runScriptableScript(options = {}) {
   /**
    * 维护当前运行的用户交互状态和安全配置状态。
    *
-   * 使用场景：配置向导测试既要模拟用户按顺序点击弹窗，也要在单个运行内读写敏感
-   * 配置。入参来自 `options.alertResponses`、`options.keychainValues` 和
+   * 使用场景：配置向导测试需要模拟用户按顺序点击弹窗；旧配置迁移和 runtime 自测还需要
+   * 在单个运行内读写隔离的兼容 Keychain。入参来自 `options.alertResponses`、
+   * `options.keychainValues` 和
    * `options.keychainFailures`；`alerts` 与最终 Keychain 值会作为结果快照返回，
    * `alertResponses` 仅供消费而不返回。响应仅在数组输入时逐项克隆，否则按空队列
    * 处理：这是为了让缺失编排在 Alert 展示时抛出固定错误，而不是静默选取动作。
@@ -695,9 +698,9 @@ async function runScriptableScript(options = {}) {
   /**
    * 按测试选项注入 Keychain 操作失败。
    *
-   * 使用场景：验证生产脚本在 Scriptable 安全存储不可用时的回退逻辑。入参为
-   * `contains`、`get`、`set` 或 `remove`；无返回值。对应配置为 Error 时原样抛出，
-   * 为其他真值时抛出固定错误，调用方应自行处理该异常。
+   * 使用场景：验证旧配置一次性迁移及 runtime 兼容接口在 Scriptable 安全存储不可用时的
+   * 回退逻辑。入参为 `contains`、`get`、`set` 或 `remove`；无返回值。对应配置为 Error
+   * 时原样抛出，为其他真值时抛出固定错误，调用方应自行处理该异常。
    */
   function throwKeychainFailure(operation) {
     /**
@@ -724,8 +727,8 @@ async function runScriptableScript(options = {}) {
     /**
      * 查询当前隔离存储是否存在指定键。
      *
-     * 使用场景：Scriptable 脚本在读取前判断配置是否已保存。入参为字符串键名，
-     * 返回布尔值；故障注入开启时抛出固定测试错误。
+     * 使用场景：旧配置迁移在读取前判断历史键是否存在，或 runtime 自测验证 API 契约。
+     * 入参为字符串键名，返回布尔值；故障注入开启时抛出固定测试错误。
      */
     contains(key) {
       throwKeychainFailure("contains");
@@ -735,18 +738,18 @@ async function runScriptableScript(options = {}) {
     /**
      * 读取当前隔离存储中的指定值。
      *
-     * 使用场景：加载已保存的敏感配置。入参为字符串键名，返回对应值；键不存在时
-     * 抛出 `Missing keychain value`，故障注入开启时优先抛出固定测试错误。
+     * 使用场景：读取待迁移的旧配置或验证 runtime API 契约。入参为字符串键名，返回
+     * 对应值；键不存在时抛出 `Missing keychain value`，故障注入开启时优先抛出固定测试错误。
      */
     get(key) {
       throwKeychainFailure("get");
       /**
        * 区分“键不存在”与“键已保存但值为假值”。
        *
-       * 使用场景：配置初始化要能可靠识别未保存的配置，不能把空字符串、0 或 false
+       * 使用场景：一次性迁移需要可靠识别历史键的缺失，不能把空字符串、0 或 false
        * 误判为缺失。入参为请求读取的键名；键存在时本方法随后返回原始存储值，键不
        * 存在时没有正常出参并抛出 `Missing keychain value`。此处使用 `Object.hasOwn`
-       * 而不是值的真值判断，分支依据是 Keychain 的存在性而非配置内容。
+       * 而不是值的真值判断，分支依据是历史键是否存在而非其内容。
        */
       if (!Object.hasOwn(keychainValues, key)) {
         throw new Error("Missing keychain value");
@@ -757,17 +760,16 @@ async function runScriptableScript(options = {}) {
     /**
      * 在本次 runtime 调用隔离的安全存储中写入值。
      *
-     * 使用场景：保存配置向导已校验的用户输入。入参为键名和值，无返回值；故障
-     * 注入开启时不写入并抛出固定测试错误。
+     * 使用场景：runtime API 兼容测试模拟历史安全存储写入；日常配置保存不应调用此
+     * 接口。入参为键名和值，无返回值；故障注入开启时不写入并抛出固定测试错误。
      */
     set(key, value) {
       /**
        * 记录一次不包含配置内容的 Keychain.set 调用。
        *
-       * 使用场景：配置表单必须把 schema v1 作为单个整体原子保存，测试需要验证调用
-       * 次数和目标键而不能回显 API Key 或 URL。入参为 Keychain.set 的原始键和值；仅
-       * 记录键和字符串长度，value 不是字符串时记录 null。记录发生在故障注入之前，
-       * 因此写入失败测试也能观察到真实尝试次数。
+       * 使用场景：runtime API 兼容测试需要验证调用次数和目标键而不能回显 API Key 或
+       * URL。入参为 Keychain.set 的原始键和值；仅记录键和字符串长度，value 不是字符串
+       * 时记录 null。记录发生在故障注入之前，因此写入失败测试也能观察到真实尝试次数。
        */
       keychainSetCalls.push({
         key,
@@ -780,8 +782,8 @@ async function runScriptableScript(options = {}) {
     /**
      * 从本次 runtime 调用隔离的安全存储中移除指定键。
      *
-     * 使用场景：清除或迁移过期配置。入参为键名，无返回值；不存在的键按 JavaScript
-     * `delete` 语义静默处理，故障注入开启时抛出固定测试错误。
+     * 使用场景：一次性迁移清除历史键或 runtime 自测删除隔离值。入参为键名，无返回值；
+     * 不存在的键按 JavaScript `delete` 语义静默处理，故障注入开启时抛出固定测试错误。
      */
     remove(key) {
       throwKeychainFailure("remove");

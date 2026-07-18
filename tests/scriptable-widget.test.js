@@ -16,12 +16,12 @@ const ICLOUD_PENDING_PATH = "teslamate/config.v1.pending.json";
 const ICLOUD_BACKUP_PATH = "teslamate/config.v1.backup.json";
 
 /**
- * 将测试配置序列化为生产脚本使用的单键 Keychain 值。
+ * 将测试配置序列化为旧版单键 Keychain 值。
  *
- * 使用场景：缺失配置门禁和正常 Widget 流程都需要构造不含真实凭据的 schema v1
- * 配置。入参 `overrides` 可覆盖任意配置字段；返回完整配置的 JSON 字符串。测试只
- * 使用保留域名和虚构 Key，不会读写外部安全存储；不可序列化值会由 JSON.stringify
- * 原样抛出，使测试立即失败。
+ * 使用场景：仅一次性旧配置迁移测试需要构造不含真实凭据的 schema v1 内容；日常
+ * Widget/App fixture 一律改用 `iCloudConfigJson()`。入参 `overrides` 可覆盖任意配置
+ * 字段；返回完整配置的 JSON 字符串。测试只使用保留域名和虚构 Key，不会读写外部
+ * 安全存储；不可序列化值会由 JSON.stringify 原样抛出，使测试立即失败。
  */
 function runtimeConfigJson(overrides = {}) {
   return JSON.stringify({
@@ -196,11 +196,12 @@ function mapImages(widget) {
  * 断言敏感 sentinel 不会进入脚本日志、Alert 消息或 Widget 可见文案。
  *
  * 使用场景：网络和配置存储故障测试需要同时覆盖三个用户可观测输出面。入参为
- * runtime 结果和待保护字符串数组；无返回值。只检查 Alert 的标题与消息，不检查
- * 配置表单文本框，因为表单在用户主动管理配置时必须回显已保存值；任一输出包含
- * 完整 sentinel 时由 node:assert 立即报告泄漏来源。
+ * runtime 结果、待保护字符串数组和可选的抛出异常；无返回值。只检查 Alert 的标题与
+ * 消息，不检查配置表单文本框，因为表单在用户主动管理配置时必须回显已保存值；网络
+ * 请求调试快照同样不在此处检查，因为 fixture 会刻意包含虚构配置。任一输出或可选
+ * `error.message` 包含完整 sentinel 时由 node:assert 立即报告泄漏来源。
  */
-function assertSensitiveValuesAbsent(result, sensitiveValues) {
+function assertSensitiveValuesAbsent(result, sensitiveValues, error = null) {
   const logOutput = result.logs.join("\n");
   const alertOutput = result.alerts
     .map((alert) => `${alert.title}\n${alert.message}`)
@@ -212,8 +213,32 @@ function assertSensitiveValuesAbsent(result, sensitiveValues) {
     assert.equal(logOutput.includes(sensitiveValue), false, "日志包含敏感 sentinel");
     assert.equal(alertOutput.includes(sensitiveValue), false, "Alert 消息包含敏感 sentinel");
     assert.equal(widgetOutput.includes(sensitiveValue), false, "Widget 文案包含敏感 sentinel");
+    // 抛错路径没有 UI 快照时，异常 message 是唯一需要纳入脱敏回归的用户可观测面。
+    if (error) {
+      assert.equal(error.message.includes(sensitiveValue), false, "异常消息包含敏感 sentinel");
+    }
   }
 }
+
+/**
+ * 验证脱敏断言同时覆盖已抛出异常的 message。
+ *
+ * 使用场景：业务分支可能在生成 Widget、Alert 或日志前终止，只有异常消息可暴露原始
+ * 请求 URL 或 Key。入参为 node:test 上下文；无业务返回值。构造的结果快照刻意不含
+ * sentinel，确保本测试只能因可选错误参数的泄漏检查而通过。
+ */
+test("敏感信息断言覆盖抛出异常的 message", () => {
+  const sentinel = "sentinel-error-message-secret";
+  const emptyResult = {
+    alerts: [],
+    logs: [],
+    widget: null
+  };
+
+  assert.throws(() => {
+    assertSensitiveValuesAbsent(emptyResult, [sentinel], new Error(`failure: ${sentinel}`));
+  }, /异常消息包含敏感 sentinel/);
+});
 
 /**
  * 执行预期失败的 Scriptable 脚本，并取得 runtime 附加的脱敏快照。
@@ -1839,13 +1864,27 @@ test("有效 iCloud 配置永不读取 Keychain", async (t) => {
  * 静态验证旧 Keychain 候选只从 App 缺失 iCloud 分支调用。
  *
  * 使用场景：运行测试无法穷举未来重构后的所有调用路径。无业务入参；测试读取生产源码，
- * 断言候选函数只有定义和 `runsInApp ? ... : missing` 调用两个出现位置，阻止 Widget 回归。
+ * 断言候选函数只有定义和 App 缺失分支调用两个出现位置，并验证 `main()` 在创建运行
+ * 上下文前已截断非 ready Widget。这里检查控制流锚点而非整段实现快照，避免无关排版
+ * 或渲染细节改动让门禁失效。
  */
 test("Keychain 迁移候选只在 App 的 iCloud 缺失分支调用", () => {
   const source = fs.readFileSync(SCRIPT_PATH, "utf8");
   const calls = source.match(/loadLegacyMigrationCandidate\s*\(/g) || [];
+  const mainStart = source.indexOf("async function main()");
+  const mainEnd = source.indexOf("\nawait main();", mainStart);
+  const mainSource = source.slice(mainStart, mainEnd);
+  const nonReadyGate = mainSource.indexOf('if (configResult.status !== "ready")');
+  const runtimeContextCreation = mainSource.indexOf("const runtimeContext = createRuntimeContext()");
+
   assert.equal(calls.length, 2);
   assert.match(source, /return runsInApp \? loadLegacyMigrationCandidate\(\) : \{ status: "missing" \}/);
+  assert.ok(mainStart >= 0 && mainEnd > mainStart, "必须能定位 main() 状态门禁");
+  assert.match(mainSource, /const configResult = await loadRuntimeConfig\(config\.runsInApp\)/);
+  assert.ok(nonReadyGate >= 0 && nonReadyGate < runtimeContextCreation,
+    "非 ready 状态必须在本地缓存初始化前结束");
+  assert.match(mainSource, /renderUnavailableConfigWidget\(config\.widgetFamily\);\s*return;/);
+  assert.equal(mainSource.includes("Keychain."), false, "Widget 分支不得直接调用 Keychain");
 });
 
 /**
@@ -2447,9 +2486,7 @@ test("无车辆缓存时 TeslaMate 请求失败抛出固定脱敏错误", async 
   assert.equal(result.widget, null);
   assert.equal(result.alerts.length, 0);
   assert.equal(result.script.completed, false);
-  assertSensitiveValuesAbsent(result, [sentinelApiUrl, sentinelKey]);
-  assert.equal(error.message.includes(sentinelApiUrl), false);
-  assert.equal(error.message.includes(sentinelKey), false);
+  assertSensitiveValuesAbsent(result, [sentinelApiUrl, sentinelKey], error);
 });
 
 /**
