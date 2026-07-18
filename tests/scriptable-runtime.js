@@ -225,7 +225,18 @@ class TestFileManager {
   }
 
   cacheDirectory() { return path.join(this.documents, ".cache"); }
-  createDirectory(filePath) { fs.mkdirSync(filePath, { recursive: true }); }
+
+  /**
+   * 在当前 FileManager 实例的 documents 根内创建目录。
+   *
+   * 使用场景：本地缓存和 iCloud 配置都可创建其自身子目录，但不得借此跨越两类根目录。
+   * 入参为目标目录路径；路径校验会先规范化并拒绝根外、`..` 或另一实例的绝对路径，成功
+   * 后递归创建目录。无正常返回值，拒绝错误不包含调用方传入路径，避免意外暴露文件信息。
+   */
+  createDirectory(filePath) {
+    const safePath = this.assertPathInDocuments(filePath);
+    fs.mkdirSync(safePath, { recursive: true });
+  }
   documentsDirectory() { return this.documents; }
 
   /**
@@ -236,12 +247,22 @@ class TestFileManager {
    * 系统的存在性布尔值。故障优先于文件访问，确保测试不会因意外状态掩盖目标分支。
    */
   fileExists(filePath) {
-    this.recordFileOperation("fileExists", filePath);
+    const safePath = this.assertPathInDocuments(filePath);
+    this.recordFileOperation("fileExists", safePath);
     this.throwFileFailure("fileExists");
-    return fs.existsSync(filePath);
+    return fs.existsSync(safePath);
   }
+
+  /**
+   * 判断指定路径是否为当前实例根内的目录。
+   *
+   * 使用场景：运行脚本只能检查自身 documents 下的目录结构，不能借 `isDirectory` 探测
+   * local/iCloud 另一根目录。入参为目录绝对路径；校验通过后返回存在且为目录的布尔值，
+   * 路径越界时抛固定脱敏错误而不读取目标元数据。
+   */
   isDirectory(filePath) {
-    return fs.existsSync(filePath) && fs.statSync(filePath).isDirectory();
+    const safePath = this.assertPathInDocuments(filePath);
+    return fs.existsSync(safePath) && fs.statSync(safePath).isDirectory();
   }
   joinPath(lhsPath, rhsPath) { return path.join(lhsPath, rhsPath); }
 
@@ -253,9 +274,10 @@ class TestFileManager {
    * FileManager 同样返回集合状态，以便 stub 的 API 行为保持一致。
    */
   isFileDownloaded(filePath) {
-    this.recordFileOperation("downloadState", filePath);
+    const safePath = this.assertPathInDocuments(filePath);
+    this.recordFileOperation("downloadState", safePath);
     this.throwFileFailure("downloadState");
-    return this.downloadedFiles.has(filePath);
+    return this.downloadedFiles.has(safePath);
   }
 
   /**
@@ -265,9 +287,10 @@ class TestFileManager {
    * 时将路径写入已下载集合并返回 Promise<void>，不读取或记录任何文件正文。
    */
   async downloadFileFromiCloud(filePath) {
-    this.recordFileOperation("download", filePath);
+    const safePath = this.assertPathInDocuments(filePath);
+    this.recordFileOperation("download", safePath);
     this.throwFileFailure("download");
-    this.downloadedFiles.add(filePath);
+    this.downloadedFiles.add(safePath);
   }
 
   /**
@@ -278,12 +301,15 @@ class TestFileManager {
    * 成功时创建目标父目录、同步重命名，并将已下载标记从源迁移到目标；无正常返回值。
    */
   move(sourcePath, destinationPath) {
-    this.recordFileOperation("move", destinationPath);
+    // 源和目标都必须先被归属校验，避免目标观测或 rename 间接读取另一实例文件。
+    const safeSourcePath = this.assertPathInDocuments(sourcePath);
+    const safeDestinationPath = this.assertPathInDocuments(destinationPath);
+    this.recordFileOperation("move", safeDestinationPath);
     this.throwFileFailure("move");
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    fs.renameSync(sourcePath, destinationPath);
-    if (this.downloadedFiles.delete(sourcePath)) {
-      this.downloadedFiles.add(destinationPath);
+    fs.mkdirSync(path.dirname(safeDestinationPath), { recursive: true });
+    fs.renameSync(safeSourcePath, safeDestinationPath);
+    if (this.downloadedFiles.delete(safeSourcePath)) {
+      this.downloadedFiles.add(safeDestinationPath);
     }
   }
 
@@ -295,10 +321,32 @@ class TestFileManager {
    * 不存在时保持 Node `rmSync(..., force: true)` 的静默语义。
    */
   remove(filePath) {
-    this.recordFileOperation("remove", filePath);
+    const safePath = this.assertPathInDocuments(filePath);
+    this.recordFileOperation("remove", safePath);
     this.throwFileFailure("remove");
-    fs.rmSync(filePath, { recursive: true, force: true });
-    this.downloadedFiles.delete(filePath);
+    fs.rmSync(safePath, { recursive: true, force: true });
+    this.downloadedFiles.delete(safePath);
+  }
+
+  /**
+   * 统一校验并规范化属于当前 FileManager documents 根的路径。
+   *
+   * 使用场景：每个文件 I/O 与观测读取都必须通过此单一边界，防止 local 实例读取 iCloud
+   * 文件、iCloud 实例读取本地缓存，或调用方用 `..` 跳出根目录。入参为待访问的文件或
+   * 目录路径；返回规范化后的绝对路径。路径不是字符串、解析后等于根外路径或相对路径以
+   * `..` 开头时抛固定错误，不包含原路径，因而不会把其他临时根信息写入日志或快照。
+   */
+  assertPathInDocuments(filePath) {
+    if (typeof filePath !== "string") {
+      throw new Error(`Mock FileManager ${this.kind} rejected path outside documents directory`);
+    }
+    const documentsRoot = path.resolve(this.documents);
+    const resolvedPath = path.resolve(filePath);
+    const relativePath = path.relative(documentsRoot, resolvedPath);
+    if (relativePath === ".." || relativePath.startsWith(`..${path.sep}`)) {
+      throw new Error(`Mock FileManager ${this.kind} rejected path outside documents directory`);
+    }
+    return resolvedPath;
   }
 
   /**
@@ -313,7 +361,9 @@ class TestFileManager {
     if (!this.observations) {
       return;
     }
-    const relativePath = path.relative(this.documents, filePath);
+    // 观测也必须独立校验，防止未来新增调用漏过 I/O 边界而生成 `../` 快照条目。
+    const safePath = this.assertPathInDocuments(filePath);
+    const relativePath = path.relative(this.documents, safePath);
     this.observedFilePaths.add(relativePath);
     const counterName = {
       download: "downloadCalls",
@@ -349,8 +399,16 @@ class TestFileManager {
     }
   }
 
+  /**
+   * 返回当前实例根内图片文件的测试 Image 引用。
+   *
+   * 使用场景：本地地图缓存读取需要图片对象，而 runtime 不解析真实图像二进制。入参为图片
+   * 绝对路径；先由统一边界校验拒绝跨 local/iCloud 或 `..` 路径，成功后返回仅包含规范化
+   * 路径的 Image 元数据，不读取文件正文或将其写入观测。
+   */
   readImage(filePath) {
-    return new Image({ kind: "file", path: filePath });
+    const safePath = this.assertPathInDocuments(filePath);
+    return new Image({ kind: "file", path: safePath });
   }
 
   /**
@@ -361,26 +419,45 @@ class TestFileManager {
    * 覆盖数组耗尽或未配置时读取实际隔离文件；正文仅返回给 VM，观测中只记录最终文件长度。
    */
   readString(filePath) {
-    this.recordFileOperation("readString", filePath);
+    const safePath = this.assertPathInDocuments(filePath);
+    this.recordFileOperation("readString", safePath);
     this.throwFileFailure("readString");
-    const relativePath = path.relative(this.documents, filePath);
+    const relativePath = path.relative(this.documents, safePath);
     const overrides = this.readOverrides[relativePath];
     if (Array.isArray(overrides) && overrides.length > 0) {
       return overrides.shift();
     }
-    return fs.readFileSync(filePath, "utf8");
+    return fs.readFileSync(safePath, "utf8");
   }
 
   temporaryDirectory() { return os.tmpdir(); }
+
+  /**
+   * 将图片元数据写入当前实例根内的测试文件。
+   *
+   * 使用场景：Scriptable runtime 以 JSON 模拟图片缓存；入参为目标绝对路径和 Image，路径
+   * 必须归属当前 documents 根。校验先于创建父目录与写入，避免 local/iCloud 通过图片缓存
+   * API 相互覆盖；成功时无返回值，图片内容不进入 iCloud 文件观测。
+   */
   writeImage(filePath, image) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(image.meta));
+    const safePath = this.assertPathInDocuments(filePath);
+    fs.mkdirSync(path.dirname(safePath), { recursive: true });
+    fs.writeFileSync(safePath, JSON.stringify(image.meta));
   }
+
+  /**
+   * 将文本写入当前 FileManager 实例根内的文件。
+   *
+   * 使用场景：本地车辆缓存与 iCloud 配置事务都会创建或更新文本文件。入参为目标绝对路径
+   * 与文本正文；先集中校验路径，再记录脱敏观测与处理写入故障，最后创建父目录并使用 UTF-8
+   * 写入。校验在观测之前，确保跨根和 `..` 输入既不写入文件也不产生越界路径、长度或正文。
+   */
   writeString(filePath, content) {
-    this.recordFileOperation("writeString", filePath);
+    const safePath = this.assertPathInDocuments(filePath);
+    this.recordFileOperation("writeString", safePath);
     this.throwFileFailure("writeString");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content, "utf8");
+    fs.mkdirSync(path.dirname(safePath), { recursive: true });
+    fs.writeFileSync(safePath, content, "utf8");
   }
 
   /**
@@ -409,7 +486,8 @@ class TestFileManager {
     collectFiles(this.documents);
 
     return [...relativePaths].sort().map((relativePath) => {
-      const filePath = path.join(this.documents, relativePath);
+      // 所有枚举与历史观测路径均回到统一边界，防止异常条目触发根外 exists/stat。
+      const filePath = this.assertPathInDocuments(path.join(this.documents, relativePath));
       const exists = fs.existsSync(filePath);
       return {
         path: relativePath,

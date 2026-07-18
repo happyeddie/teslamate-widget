@@ -982,6 +982,120 @@ test("runtime 将本地缓存与 iCloud 配置隔离并提供脱敏文件观测"
 });
 
 /**
+ * 验证每个带路径的 FileManager I/O 都拒绝把另一实例的 documents 路径当作自身文件。
+ *
+ * 使用场景：runtime 同时暴露 local 和 iCloud FileManager；若任意入口没有集中校验根目录，
+ * 被测脚本就可能跨越缓存与配置隔离边界。入参为 node:test 上下文；每个子场景将 iCloud
+ * 路径传给 local 实例的一个 I/O API，预期固定拒绝错误且不会执行外部文件系统操作。
+ */
+test("FileManager 全部文件 I/O 拒绝跨 local/iCloud 根目录", async (t) => {
+  const operationCases = [
+    { name: "createDirectory", source: "local.createDirectory(cloudTarget);" },
+    { name: "fileExists", source: "local.fileExists(cloudTarget);" },
+    { name: "isDirectory", source: "local.isDirectory(cloudTarget);" },
+    { name: "readImage", source: "local.readImage(cloudTarget);" },
+    { name: "readString", source: "local.readString(cloudTarget);" },
+    {
+      name: "writeImage",
+      source: "local.writeImage(cloudTarget, Image.fromData(Data.fromBase64String(\"AA==\")));"
+    },
+    { name: "writeString", source: "local.writeString(cloudTarget, \"safe\");" },
+    { name: "remove", source: "local.remove(cloudTarget);" },
+    { name: "isFileDownloaded", source: "local.isFileDownloaded(cloudTarget);" },
+    { name: "downloadFileFromiCloud", source: "await local.downloadFileFromiCloud(cloudTarget);" },
+    {
+      name: "move source",
+      source: "local.move(cloudTarget, local.joinPath(local.documentsDirectory(), \"target.json\"));"
+    },
+    {
+      name: "move destination",
+      source: `
+        const localSource = local.joinPath(local.documentsDirectory(), "source.json");
+        local.writeString(localSource, "safe");
+        local.move(localSource, cloudTarget);
+      `
+    }
+  ];
+
+  for (const operationCase of operationCases) {
+    await t.test(operationCase.name, async (subtest) => {
+      const runtimeError = await captureRuntimeFailure({
+        documentsDirectory: createRuntimeDocumentsDirectory(subtest),
+        iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(subtest),
+        iCloudFiles: { "teslamate/config.v1.json": "sentinel-config-body" },
+        scriptPath: writeRuntimeTestScript(subtest, `
+          const local = FileManager.local();
+          const cloud = FileManager.iCloud();
+          const cloudTarget = cloud.joinPath(cloud.documentsDirectory(), "teslamate/config.v1.json");
+          ${operationCase.source}
+        `)
+      });
+
+      assert.match(runtimeError.message, /Mock FileManager local rejected path outside documents directory/);
+    });
+  }
+});
+
+/**
+ * 验证 iCloud 文件操作拒绝 `..` 与 local 路径，且失败快照绝不产生越界观测。
+ *
+ * 使用场景：观测在故障注入前记录调用，必须先完成路径校验，否则相对化跨根路径会产生
+ * `../` 条目并可能读取 local 缓存元数据。入参为 node:test 上下文；临时脚本以 iCloud
+ * 实例尝试访问 local 文件，预期获得固定拒绝错误，观测只保留 iCloud 根内的预置文件。
+ */
+test("iCloud 路径校验阻止越界观测和跨根文件元数据读取", async (t) => {
+  const runtimeError = await captureRuntimeFailure({
+    documentsDirectory: createRuntimeDocumentsDirectory(t),
+    iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(t),
+    iCloudFiles: { "teslamate/config.v1.json": "sentinel-config-body" },
+    scriptPath: writeRuntimeTestScript(t, `
+      const local = FileManager.local();
+      const cloud = FileManager.iCloud();
+      const localTarget = local.joinPath(local.documentsDirectory(), "local-only.json");
+      local.writeString(localTarget, "sentinel-local-body");
+      cloud.fileExists(localTarget);
+    `)
+  });
+
+  assert.match(runtimeError.message, /Mock FileManager iCloud rejected path outside documents directory/);
+  assert.deepEqual(runtimeError.runtimeResult.iCloudFileObservations.files, [{
+    path: "teslamate/config.v1.json",
+    exists: true,
+    length: "sentinel-config-body".length
+  }]);
+  assert.equal(
+    runtimeError.runtimeResult.iCloudFileObservations.files.some((file) => file.path.startsWith("..")),
+    false
+  );
+  assert.equal(JSON.stringify(runtimeError.runtimeResult.iCloudFileObservations).includes("sentinel-local-body"), false);
+});
+
+/**
+ * 验证 joinPath 得到的 `..` 路径同样在 I/O 边界被拒绝。
+ *
+ * 使用场景：Scriptable 的 joinPath 不负责授权校验，调用方可合法拼出上级目录；真正读写前
+ * 必须由 FileManager 集中拒绝。入参为 node:test 上下文；无正常业务返回，越界未抛错或
+ * 快照出现 `..` 路径都表示隔离回归。
+ */
+test("FileManager 拒绝 documents 根外的 .. 路径", async (t) => {
+  const runtimeError = await captureRuntimeFailure({
+    documentsDirectory: createRuntimeDocumentsDirectory(t),
+    iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(t),
+    scriptPath: writeRuntimeTestScript(t, `
+      const cloud = FileManager.iCloud();
+      const escaped = cloud.joinPath(cloud.documentsDirectory(), "../outside.json");
+      cloud.readString(escaped);
+    `)
+  });
+
+  assert.match(runtimeError.message, /Mock FileManager iCloud rejected path outside documents directory/);
+  assert.equal(
+    runtimeError.runtimeResult.iCloudFileObservations.files.some((file) => file.path.startsWith("..")),
+    false
+  );
+});
+
+/**
  * 验证 iCloud FileManager 能按相对路径依次消费读取覆盖值，并禁止将正文写入结果快照。
  *
  * 使用场景：配置保存事务需要稳定模拟“首次校验成功、正式安装后复读损坏”的竞态。入参
