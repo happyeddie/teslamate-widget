@@ -1,37 +1,7 @@
-# 默认规则
+# 项目开发约定
 
-- 全程使用中文与 Human 和 SubAgent 对话、编辑文档和记录结论，只说明必要信息。
-- 开始项目工作前先完整阅读并理解本文件；若本文件不存在，可忽略此规则。
+## 文档与注释
 
-## 开发规范
-
-- 所有代码开发都应按职责合理拆分模块，并优先复用已有模块。
-- 每个代码块和方法都应补充足以说明使用场景、业务规则与入参/出参约束的注释；`if`、`switch`、复杂公式或算法应说明分支或计算意图，使注释可作为维护文档。
-
-## 提交规范
-
-- 完成检查后可以 commit；提交信息与 change log 使用中文，绝不主动 push。
-
-## SuperPowers 使用规范
-
-- 前端代码默认不需要 TDD。
-- SuperPowers 目录默认排除在 Git 之外，不要强制提交。
-- 如有必要，默认开启 SuperPowers Visual companion，无需询问。
-- 自行安排 SubAgent 完成 SuperPowers 的 specs / plan 审查；确认无误后直接询问用户下一步如何推进实施。
-- Finish Development Branch 时，默认在本地 commit，并通过 Git 提交 PR / MR；输出 MR 链接供用户审查。
-
-## Codex Desktop
-
-- 如无明确要求，浏览器操作默认使用 Codex 内置浏览器，不使用 Playwright。
-- 使用 Computer Use 时默认在后台操作，不打扰用户的正常工作。
-
---- project-doc ---
-
-# AI 开发约定
-
-## 工作语言
-
-- 与用户沟通、文档、审查结论和提交信息默认使用中文。
 - 默认 README 使用纯英文；中文用户文档维护在 `README.zh-CN.md`。
 - 代码注释应覆盖方法职责、使用场景和非直观的业务规则；避免只复述显而易见的语句。
 
@@ -116,6 +86,29 @@ npm run capture:iphone:mirror
 npm run capture:iphone:mirror:widget
 ```
 
+## 部署到 Scriptable iCloud
+
+- macOS 上的 Scriptable iCloud documents 目录使用与用户无关的路径表示：`$HOME/Library/Mobile Documents/iCloud~dk~simonbs~Scriptable/Documents`。
+- 仓库源文件是 `Telsa Car.js`，运行文件固定部署为上述目录中的 `Tesla Widget.js`；两个文件名的差异是历史兼容约定，不要擅自重命名。
+- 部署前必须运行完整测试；测试通过后，使用完整文件覆盖更新运行脚本，不得保留或拼接旧脚本中的配置行：
+
+```bash
+npm test
+SCRIPTABLE_DOCUMENTS="$HOME/Library/Mobile Documents/iCloud~dk~simonbs~Scriptable/Documents"
+cp "Telsa Car.js" "$SCRIPTABLE_DOCUMENTS/Tesla Widget.js"
+```
+
+- 部署后必须校验仓库源文件与 iCloud 运行文件字节一致，并记录 SHA-256 校验结果：
+
+```bash
+SCRIPTABLE_DOCUMENTS="$HOME/Library/Mobile Documents/iCloud~dk~simonbs~Scriptable/Documents"
+cmp -s "Telsa Car.js" "$SCRIPTABLE_DOCUMENTS/Tesla Widget.js"
+shasum -a 256 "Telsa Car.js" "$SCRIPTABLE_DOCUMENTS/Tesla Widget.js"
+```
+
+- 部署只允许覆盖 `Tesla Widget.js`。不得读取、列出、复制、覆盖或输出同级 `teslamate/` 配置目录及其内容，也不得触碰 `tesla/` 车辆缓存目录。
+- 文件写入完成仅表示已更新本机 iCloud Drive；跨设备到达时间由 iCloud 决定，脚本和部署流程不得宣称已经完成上传或同步。
+
 ## 修改原则
 
 - 修改 UI 前先看 `docs/scriptable-capabilities.md` 和 `docs/architecture.md`。
@@ -130,4 +123,4 @@ npm run capture:iphone:mirror:widget
 
 - 开始和结束前检查 `git status --short --branch`。
 - 避免使用 `ls -R` 或 `grep -R` 做大范围扫描，优先使用 `rg`、`find` 或有目标的命令。
-- 提交应聚焦，提交信息使用中文并遵循标准 git commit 规范。
+- 提交应聚焦，并遵循标准 git commit 规范。
