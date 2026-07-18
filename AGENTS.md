@@ -55,9 +55,10 @@
 
 ## 配置与数据
 
-- 首次使用时，用户在 Scriptable App 内运行脚本并通过配置表单写入版本化 Keychain 配置；运行时从不在源码或 Scriptable documents 目录保存凭据。
-- 仓库 `Telsa Car.js` 与 iCloud Scriptable 运行文件 `Tesla Widget.js` 必须字节一致，二者均不得包含 Amap Key、私有 TeslaMate URL、VIN、坐标、token 或其他个人凭据。
-- 每台设备、重新安装或迁移 Scriptable 后都可能需要重新在对应设备的 Keychain 中完成配置。
+- 日常运行配置的唯一来源是 Scriptable iCloud documents 下的 `teslamate/config.v1.json`。
+- 保存事务只允许临时创建同目录 `config.v1.pending.json` 和 `config.v1.backup.json`；三个固定文件是 Scriptable documents 凭据禁令的唯一例外。
+- 旧 Keychain 键 `teslamate-widget.config.v1` 只允许在 App 内执行一次性迁移；Widget 永不访问，迁移成功后删除，失败时不作为运行回退。
+- 仓库脚本与 iCloud `Tesla Widget.js` 仍必须字节一致，且不得包含任何个人凭据；同步脚本不得读取、覆盖或输出 `teslamate/` 配置目录内容。
 - 外部服务包括 TeslaMateApi、TeslaMate Web UI、高德静态地图 API，以及 Scriptable/iOS `Location.reverseGeocode()`。
 - `args.widgetParameter` 支持传入车 ID 和主题标记，例如 `1`、`dark,1` 或 `1,dark`。
 - 缓存目录是 Scriptable documents 下的 `tesla/`：
@@ -119,7 +120,7 @@ npm run capture:iphone:mirror:widget
 
 - 修改 UI 前先看 `docs/scriptable-capabilities.md` 和 `docs/architecture.md`。
 - 新增 Scriptable API 用法时，同步扩展 `tests/scriptable-runtime.js` 的 stub，并增加测试覆盖。
-- 配置读取、网络请求、缓存初始化都必须通过运行配置门禁；配置缺失时 Widget 只显示静态引导，App 内才可展示配置表单。
+- 配置读取、网络请求、缓存初始化都必须通过运行配置门禁；Widget 遇到任何非 `ready` 状态只显示静态 iCloud 同步提示，且不得下载 iCloud 文件、读取旧 Keychain、发起 Request 或初始化车辆缓存。App 才可下载、恢复、迁移或展示配置表单。
 - 不要把真实车辆接口地址、Amap Key、VIN、坐标、token、截图中的隐私位置写入仓库、iCloud 脚本文本、日志、测试产物或提交历史。
 - 代码完成、测试通过后，将仓库脚本完整覆盖同步到 iCloud `Tesla Widget.js`，并校验两者 SHA-256 一致；不得通过保留旧脚本配置行的方式同步。
 - README 截图应保持体积合理，并与 README 内容相关。

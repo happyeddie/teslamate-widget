@@ -24,15 +24,16 @@
 
 `Telsa Car.js` 是唯一 Scriptable 入口。它按运行上下文分成三条路径：
 
-1. App 内运行：先读取 Keychain。配置缺失时直接打开配置表单；配置完整时显示“打开 TeslaMate / 管理配置”菜单。
-2. 锁屏 accessory widget：先执行配置门禁；配置有效时拉取或读取缓存车辆数据并绘制圆形电量图，配置无效时只显示配置提示。
-3. 桌面 widget：先执行配置门禁；配置有效时拉取车辆状态、地理编码和地图并构建中号 widget，配置无效时只显示配置提示。
+1. App 内运行：从 Scriptable iCloud documents 读取配置；文件未下载时等待下载，配置缺失、损坏或需迁移时按状态展示受限操作，配置完整时显示“打开 TeslaMate / 管理配置”菜单。
+2. 锁屏 accessory widget：先执行 iCloud 配置门禁；仅 `ready` 时拉取或读取缓存车辆数据并绘制圆形电量图，其他状态只显示静态同步提示。
+3. 桌面 widget：先执行 iCloud 配置门禁；仅 `ready` 时拉取车辆状态、地理编码和地图并构建中号 widget，其他状态只显示静态同步提示。
 
 项目继续采用单文件分发，用户只需安装并在 Scriptable App 内运行 `Telsa Car.js` 完成配置。仓库源码和 iCloud 运行文件保持字节一致，均不保存凭据。脚本内部按职责划分为命名函数：
 
 - `main()`：先加载运行配置，再根据 Scriptable 运行上下文分发执行路径。
-- `validateRuntimeConfig()`：验证 schema v1 配置并标准化两个 HTTP(S) 基础 URL。
-- `loadRuntimeConfig()` / `saveRuntimeConfig()`：通过固定 Keychain 键读写版本化配置，并对异常进行脱敏降级。
+- `validateBusinessConfig()`：验证三个业务字段并标准化两个 HTTP(S) 基础 URL。
+- `validateICloudConfigEnvelope()`：验证 `schemaVersion`、规范化 ISO 8601 `updatedAt` 与业务字段。
+- `loadRuntimeConfig()` / `saveRuntimeConfig()`：异步读取和事务性保存 iCloud 配置，并以状态结果执行脱敏降级。
 - `presentAppMenu()` / `presentConfigForm()`：在 App 内展示操作菜单和安全配置表单。
 - `renderMissingConfigWidget()`：配置不可用时提交无网络、无缓存副作用的提示 Widget。
 - `createRuntimeContext()`：配置门禁通过后才创建缓存目录和正常 Widget。
@@ -48,11 +49,11 @@
 
 ```mermaid
 flowchart TD
-  A["Scriptable 运行脚本"] --> B["从 Keychain 读取并验证 schema v1 配置"]
-  B --> C{"配置有效？"}
-  C -->|"否，App"| D["Alert 配置表单"]
-  C -->|"否，Widget"| E["显示配置提示并结束"]
-  D --> F["验证并保存到 Keychain"]
+  A["Scriptable 运行脚本"] --> B["读取并验证 iCloud schema v1 配置"]
+  B --> C{"状态为 ready？"}
+  C -->|"否，App"| D["按状态下载、恢复、迁移或展示受限配置操作"]
+  C -->|"否，Widget"| E["静态 iCloud 同步提示并结束"]
+  D --> F["验证后事务性保存至 iCloud"]
   C -->|"是"| G{"运行上下文"}
   G -->|"runsInApp"| H["操作菜单：打开 TeslaMate / 管理配置"]
   G -->|"runsInAccessoryWidget"| I["读取 TeslaMateApi 或车辆缓存"]
@@ -68,7 +69,7 @@ flowchart TD
   Q --> R
 ```
 
-## 配置项
+## 配置项与状态机
 
 配置不写入源码。用户首次在 Scriptable App 内运行脚本时，通过 `Alert` 表单填写以下内容：
 
@@ -78,9 +79,33 @@ flowchart TD
 | `teslaMateApiBaseUrl` | TeslaMateApi 基础地址；不含 `/api/v1/cars/<carId>/status`，不含 query/hash，保存时去除末尾 `/` |
 | `teslaMateWebUrl` | TeslaMate Web 基础地址；不含 query/hash，保存时去除末尾 `/` |
 
-三项内容与 `schemaVersion: 1` 一起序列化到固定 Keychain 键 `teslamate-widget.config.v1`。读取后必须再次验证；键缺失、JSON 损坏、版本或字段非法、Keychain API 异常均按配置不可用处理。Widget 路径不会弹窗，也不会在配置门禁失败前创建缓存目录或网络请求。日志、提示和测试输出不得包含 Key、完整私有 URL 或原始异常对象。
+三项内容与 `schemaVersion: 1`、规范化 ISO 8601 `updatedAt` 一起序列化到 Scriptable iCloud documents 的 `teslamate/config.v1.json`。保存只写入这五个白名单字段；`teslamate/` 不存在时创建。正式文件以外，保存事务仅可在同目录使用 `config.v1.pending.json` 和 `config.v1.backup.json`。这三个固定文件均不得进入仓库、脚本文本、日志或测试产物。
 
-Keychain 属于设备侧安全存储。不同设备或重新安装、迁移 Scriptable 后，用户可能需要分别运行脚本完成配置。修改配置只能从 Scriptable App 内的“管理配置”入口进行。
+`loadRuntimeConfig()` 返回显式状态，不能用 `null` 混合失败原因：
+
+| 状态 | 定义与处理 |
+| --- | --- |
+| `ready` | 正式 iCloud 文件已下载、可读取且完整通过 envelope 与业务字段验证；只有此状态可进入正常运行。 |
+| `missing` | 正式与备份均不存在；App 可检查旧 Keychain 并提示重试同步或经用户确认创建新配置，Widget 仅提示同步。 |
+| `unavailable` | iCloud 文件存在但未下载、下载失败、文件操作失败，或需先恢复备份；App 可下载、验证恢复或重试，Widget 不等待下载。 |
+| `invalid` | 已可读取的正式或备份文件 JSON、schema、时间或业务字段不合法；App 仅在用户明确确认后修复，Widget 仅提示同步。 |
+| `legacyMigrationRequired` | 仅 App 在正式与备份均不存在时，读取并验证旧 Keychain `teslamate-widget.config.v1` 后返回的迁移候选；用户确认并写后读校验成功后才删除旧键。 |
+
+读取流程必须遵守以下安全状态机：
+
+```text
+正式文件有效 -> ready
+正式文件未下载 -> App 下载后读取 / Widget unavailable
+正式文件缺失或无效且备份存在 -> App 验证恢复 / Widget unavailable
+正式与备份都缺失 -> App 检查旧 Keychain / Widget missing
+任何非 ready Widget -> 静态同步提示，零 Request，零车辆缓存
+```
+
+App 读取正式或待恢复备份时必须等待 `downloadFileFromiCloud()`，再读取、解析与验证；Widget 若正式文件 `isFileDownloaded()` 为假立即返回 `unavailable`。备份存在时，App 必须完整验证后恢复并重新读取正式文件；备份无效或恢复失败不得进入首次创建或 Keychain 迁移。旧 Keychain 仅限 App 的一次性迁移：迁移成功且 iCloud 正式文件下载、解析、完整验证并逐字段校验后调用 `Keychain.remove()`；失败时保留旧键供下次迁移，但不作为本次运行回退。有效 iCloud 文件出现后，正常路径永不访问 Keychain。
+
+保存只允许由 App 的配置管理或迁移流程调用，Widget 永不写配置。保存先验证并构造候选配置，确保目录存在，写入并重读验证 pending 文件；随后将已验证正式文件移动为 backup，再将 pending 移动为正式文件，最后重读并逐字段校验候选配置后删除 backup。移动或校验失败时，只可恢复本次事务新建的 backup，并尽力清理 pending；不得使用候选或内存旧配置继续业务。保存成功仅表示已写入本机 iCloud Drive，提示“已保存到 iCloud Drive，将由系统同步到其他设备”，不得宣称已完成上传或跨设备传播。
+
+配置门禁失败时，Widget 不会弹窗、下载 iCloud 文件、读取旧 Keychain、创建缓存目录或网络请求。日志、提示和测试输出不得包含 Key、完整私有 URL、配置文件内容、完整路径或原始异常对象。修改配置只能从 Scriptable App 内的“管理配置”入口进行。
 
 车辆 ID 不属于安全配置，继续从 `args.widgetParameter` 中读取；未提供有效数字时默认使用 `1`。支持示例：
 
@@ -152,12 +177,12 @@ Keychain 属于设备侧安全存储。不同设备或重新安装、迁移 Scri
 
 `tests/scriptable-runtime.js` 在 Node 中提供 Scriptable API stub：
 
-- `FileManager` 映射到临时目录。
+- `FileManager.local()` 与 `FileManager.iCloud()` 分离映射到车辆缓存目录和 iCloud 配置目录，并可注入文件存在但未下载、下载、读写、移动与恢复失败。
 - `Request` 返回测试注入的 TeslaMate 响应和假图片。
-- `Keychain` 提供每次运行隔离的内存存储和读写故障注入。
+- `Keychain` 只提供 App 一次性旧配置迁移所需的隔离存储、删除和故障注入；Widget 测试断言不会访问它。
 - `Alert` 严格消费测试编排的表单、菜单与提示响应，并记录安全字段属性。
 - `ListWidget` / `WidgetStack` 记录 widget 树。
 - `DrawContext` 记录绘图操作并返回假图片对象。
 - `WebView` 记录打开 URL 和注入的 JavaScript。
 
-这套机制用于证明脚本主要分支能执行、缓存可写入、关键文字和刷新时间符合预期。
+结果快照仅返回配置路径、存在性、下载/写入/移动次数和配置文件长度，不返回生产配置正文。测试覆盖 iCloud 有效配置、Widget 未下载安全降级、App 下载与备份恢复、无效配置零网络零缓存、事务保存/恢复，以及成功迁移后删除旧 Keychain。Node stub 不能证明真实 iCloud 的上传、占位文件回收、冲突或跨设备传播，发布前仍需真实设备验收。
