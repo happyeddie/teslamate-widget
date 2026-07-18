@@ -10,6 +10,7 @@
 - TeslaMateApi 失败时是否能读取车辆缓存。
 - App 内 WebView 分支是否打开 TeslaMate 页面并注入隐藏其他车辆的脚本。
 - 已配置 Widget 的点击 URL 是否携带来源标记，并在进入 App 后跳过管理菜单直接打开 WebView。
+- iOS 尚未刷新点击 URL 的旧 Widget 快照，是否仍能通过 Widget 参数跳过管理菜单。
 
 ## 运行命令
 

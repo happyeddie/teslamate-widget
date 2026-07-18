@@ -799,8 +799,7 @@ test("App 操作菜单选择打开 TeslaMate 时展示当前车辆 WebView", asy
     ...readyICloudFixture(),
     alertResponses: [{ index: 0 }],
     jsonResponse: apiResponse(carStatus("online")),
-    runsInApp: true,
-    widgetParameter: "1"
+    runsInApp: true
   });
   cleanupRuntimeDirectories(t, result);
 
@@ -842,6 +841,27 @@ test("已配置 Widget 点击进入 App 时直接打开 TeslaMate", async (t) =>
   assert.equal(result.webViews.length, 1);
   assert.equal(result.webViews[0].loadedURL, SENTINEL_WEB_URL);
   assert.equal(result.webViews[0].presented, true);
+  assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_1"));
+  assert.equal(result.script.completed, true);
+});
+
+/**
+ * 验证旧版 Widget 快照未携带点击 URL 标记时，仍可通过 Widget 参数识别点击来源。
+ *
+ * 使用场景：脚本已由 iCloud 更新，但 iOS 尚未刷新桌面 Widget 的已归档 URL。入参为
+ * node:test 上下文；无返回值。测试刻意不传查询参数且不提供 Alert 响应，确保带车辆参数
+ * 的旧快照点击不会回退到手动运行菜单。
+ */
+test("旧 Widget 快照点击已配置脚本时不显示菜单", async (t) => {
+  const result = await runScriptableScript({
+    ...readyICloudFixture(),
+    runsInApp: true,
+    widgetParameter: "dark,2"
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.alerts.length, 0);
+  assert.equal(result.webViews.length, 1);
   assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_1"));
   assert.equal(result.script.completed, true);
 });
@@ -1004,7 +1024,8 @@ test("App 操作菜单取消时不执行任何动作", async (t) => {
 test("App iCloud 配置 missing 首屏只提供重试、创建和取消", async (t) => {
   const result = await runScriptableScript({
     alertResponses: [{ index: -1 }],
-    runsInApp: true
+    runsInApp: true,
+    widgetParameter: "1"
   });
   cleanupRuntimeDirectories(t, result);
 

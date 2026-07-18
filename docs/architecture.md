@@ -34,7 +34,7 @@
 - `validateBusinessConfig()`：验证三个业务字段并标准化两个 HTTP(S) 基础 URL。
 - `validateICloudConfigEnvelope()`：验证 `schemaVersion`、规范化 ISO 8601 `updatedAt` 与业务字段。
 - `loadRuntimeConfig()` / `saveRuntimeConfig()`：异步读取和事务性保存 iCloud 配置，并以状态结果执行脱敏降级。
-- `createWidgetOpenUrl()` / `isWidgetOpenAction()`：通过无凭据查询参数区分 Widget 点击与 App 手动运行。
+- `createWidgetOpenUrl()` / `isWidgetTriggeredAppRun()`：优先通过无凭据查询参数区分 Widget 点击与 App 手动运行，并以非空 Widget 参数兼容尚未刷新的旧快照。
 - `presentAppMenu()` / `presentConfigForm()`：仅在 App 手动运行或配置状态需要交互时展示操作菜单和安全配置表单。
 - `renderUnavailableConfigWidget()`：任意非 `ready` 配置状态下提交无网络、无缓存副作用的 iCloud 同步提示 Widget。
 - `createRuntimeContext()`：配置门禁通过后才创建缓存目录和正常 Widget。

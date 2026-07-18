@@ -1111,6 +1111,18 @@ function isWidgetOpenAction() {
 }
 
 /**
+ * 判断已配置脚本的 App 运行是否应按 Widget 点击直接打开车辆页面。
+ *
+ * 使用场景：新版 Widget 使用显式 URL 动作；iOS 尚未刷新点击 URL 的旧 Widget 快照仍会
+ * 通过 `args.widgetParameter` 传递车辆参数。无入参；任一来源信号存在即返回 true，二者
+ * 都不存在时返回 false 并保留 Scriptable App 手动运行的配置管理菜单。该兼容判断只在
+ * `ready` 门禁之后使用，因此未配置或异常配置仍进入原有安全菜单。
+ */
+function isWidgetTriggeredAppRun() {
+  return isWidgetOpenAction() || Boolean(args.widgetParameter);
+}
+
+/**
  * 解析本次运行应使用的车辆 ID，并在 Widget 点击时优先读取 URL 中的显式车辆标记。
  *
  * 使用场景：`ListWidget.url` 重新运行脚本时不依赖 `args.widgetParameter` 被系统继续传递。
@@ -2049,9 +2061,9 @@ async function main() {
     return;
   }
 
-  // 已配置 Widget 点击应直接打开车辆页面；显式 URL 标记防止普通 App 运行被误判。
+  // 已配置 Widget 点击应直接打开车辆页面；同时兼容尚未刷新显式 URL 的旧 Widget 快照。
   if (config.runsInApp) {
-    if (isWidgetOpenAction()) {
+    if (isWidgetTriggeredAppRun()) {
       await openTeslaMateWebView(configResult.value, carId);
       Script.complete();
       return;
