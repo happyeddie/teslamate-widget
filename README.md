@@ -49,11 +49,23 @@ A [Scriptable](https://scriptable.app/) widget script for TeslaMate. It shows ve
 4. Set the Scriptable widget parameter to the vehicle ID, for example `1`.
 5. If you also want to keep the theme marker, use `dark,1` or `1,dark`.
 
-The three configuration values are stored as one versioned entry in Scriptable Keychain. They are not stored in the script or the Scriptable documents folder. Keychain availability can differ between devices or after reinstalling/migrating Scriptable, so run the script and configure it separately on every device where the widget reports that configuration is missing.
+The three values are saved as one versioned configuration file in Scriptable's iCloud Drive documents. They are never written into the script. This does not add an application "master password": access is controlled by your Apple Account and trusted devices. Treat every trusted device signed in to that Apple Account as able to read this configuration.
 
 To update an existing configuration, run the script in the Scriptable app, choose **Manage Configuration**, edit the values, and save. Running a configured script also provides **Open TeslaMate**. Configuration dialogs are never shown from a widget refresh.
 
 Cache files are stored in the `tesla/` folder under Scriptable documents.
+
+### iCloud synchronization, migration, and security
+
+The configuration is shared through iCloud Drive when every device is signed in to the same Apple Account, has iCloud Drive enabled, and allows Scriptable to use iCloud. Apple documents that iCloud Drive changes are made available on devices using that account, but this script cannot observe or promise when the system has uploaded or propagated a change. Let iCloud finish before relying on another device.
+
+If you upgrade from a Keychain-only version, run the new script **in the Scriptable app on the old configured device**. Review the migration prompt and confirm it there. Only a confirmed, validated migration removes the old Keychain entry. Do not remove the old entry yourself first. A widget never migrates configuration or shows a migration form.
+
+On a second device using the same Apple Account, install the script and run it once in the Scriptable app before adding or refreshing the widget. No business values need to be entered again after the configuration has arrived. A widget deliberately does not download an iCloud placeholder: if the configuration is not downloaded yet, it shows a synchronization prompt and does not contact vehicle services. Once the configuration is downloaded, it remains readable while offline; a device that has never downloaded it remains in the safe prompt state while offline.
+
+Edit configuration on one device at a time. Concurrent edits are unsupported: there is no merge UI, and after sequential edits each device reads the version currently visible through iCloud. This is a convenience and safety boundary, not a synchronization-completion guarantee.
+
+Apple's [standard data protection](https://support.apple.com/en-us/102651) encrypts iCloud data in transit and at rest, with recovery keys held by Apple. [Advanced Data Protection](https://support.apple.com/en-us/102651) is optional and makes iCloud Drive end-to-end encrypted with keys held by trusted devices; it has stronger recovery requirements. It is not required for this widget, and neither setting makes configuration safe on an untrusted signed-in device. See Apple's [iCloud Drive setup requirements](https://support.apple.com/guide/icloud/set-up-icloud-drive-mm203b05aec8/icloud) and Scriptable's [iCloud FileManager documentation](https://docs.scriptable.app/filemanager/) for platform behavior.
 
 ## Local Automated Tests
 

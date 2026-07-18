@@ -49,11 +49,23 @@
 4. 在 Scriptable Widget 的参数中传入车辆 ID，例如 `1`。
 5. 如需保留主题标记，可传入 `dark,1` 或 `1,dark`。
 
-三项配置会作为一个带版本号的配置项保存在 Scriptable Keychain 中，不会写入脚本或 Scriptable documents 目录。不同设备、重新安装或迁移 Scriptable 后不保证已有 Keychain 配置可用；如果 Widget 提示缺少配置，请在对应设备上重新运行脚本并完成配置。
+三项配置会作为一个带版本号的配置文件保存在 Scriptable 的 iCloud Drive documents 中，不会写入脚本。项目不额外设置应用“主密码”：访问控制由 Apple Account 与受信任设备负责；应将所有登录该 Apple Account 的受信任设备视为能够读取此配置。
 
 需要修改现有配置时，在 Scriptable App 内运行脚本，选择“管理配置”，修改后保存。已完成配置时，同一菜单还可选择“打开 TeslaMate”。Widget 刷新过程不会弹出配置表单。
 
 缓存文件会写入 Scriptable documents 目录下的 `tesla/` 文件夹。
+
+### iCloud 同步、迁移与安全边界
+
+当各设备登录同一 Apple Account、开启 iCloud Drive 且允许 Scriptable 使用 iCloud 时，配置会通过 iCloud Drive 共享。Apple 说明 iCloud Drive 的变更会出现在使用该账户的设备上；但脚本无法观测或承诺系统何时已经上传或传播某次修改，请等待系统同步完成后再依赖另一台设备。
+
+如果从旧的仅 Keychain 版本升级，请在**原来已经配置的旧设备**中打开 Scriptable App 运行新脚本，查看迁移提示并在 App 内确认。只有迁移写入并校验成功后，旧 Keychain 项才会删除；不要先手动删除旧项。Widget 不会迁移配置，也不会显示迁移表单。
+
+同一 Apple Account 的第二台设备需要先安装脚本，并在 Scriptable App 内运行一次，再添加或刷新 Widget。配置到达后无需再次输入业务参数。Widget 有意不下载 iCloud 占位文件：配置尚未下载时只显示同步提示，且不会请求车辆接口。已经下载过的配置在离线时仍可读取；从未下载的设备在离线时仍保持安全提示状态。
+
+只支持单设备依次修改配置，不支持并发编辑：项目没有合并界面；依次保存后，各设备只读取 iCloud 当前可见的版本。这是使用边界，并不表示脚本能够确认同步已经完成。
+
+Apple 的[普通数据保护](https://support.apple.com/en-us/102651)会在传输和静态存储时加密 iCloud 数据，恢复密钥由 Apple 数据中心保管；可选的[高级数据保护](https://support.apple.com/en-us/102651)会让 iCloud Drive 使用端到端加密，密钥只在受信任设备上，并有更严格的恢复要求。高级数据保护不是本组件的前置条件；无论采用哪种设置，登录到不受信任设备都会带来配置泄露风险。请参阅 Apple 的 [iCloud Drive 设置要求](https://support.apple.com/guide/icloud/set-up-icloud-drive-mm203b05aec8/icloud) 与 Scriptable 的 [iCloud FileManager 文档](https://docs.scriptable.app/filemanager/)。
 
 ## 本地自动化测试
 
