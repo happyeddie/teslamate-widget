@@ -125,22 +125,17 @@ function normalizeHttpBaseUrl(value) {
 }
 
 /**
- * 验证并标准化完整的 schema v1 运行配置。
+ * 验证并标准化三个业务配置字段。
  *
- * 使用场景：不信任 Keychain JSON 和 App 表单输入，任何数据进入请求链前都调用本
- * 方法。入参为任意值；成功返回只包含四个规范字段的 `{ ok: true, value }`，失败
- * 返回脱敏错误。对象结构、schema、空 Key 或任一 URL 非法均不抛异常，而是返回首个
- * 可操作错误；原对象中的额外字段不会进入保存结果。
+ * 使用场景：App 表单、旧 Keychain 迁移候选和 iCloud envelope 共用同一业务规则。
+ * 入参为任意值；成功返回只含 `amapApiKey`、`teslaMateApiBaseUrl`、
+ * `teslaMateWebUrl` 的 `{ ok: true, value }`，失败返回不含原始输入的固定消息。
+ * 额外字段会被白名单过滤，方法不读取 schema、时间或任何存储。
  */
-function validateRuntimeConfig(input) {
-  // 配置必须是普通非数组对象；分支依据是后续要按固定字段读取 schema。
+function validateBusinessConfig(input) {
+  // 业务配置必须是普通非数组对象；否则不能安全读取固定白名单字段。
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return { ok: false, message: "运行配置格式无效" };
-  }
-
-  // 当前脚本只理解 schema v1；其他版本必须显式拒绝，避免误读未来数据结构。
-  if (input.schemaVersion !== 1) {
-    return { ok: false, message: "运行配置版本不受支持" };
   }
 
   const amapApiKey = typeof input.amapApiKey === "string" ? input.amapApiKey.trim() : "";
@@ -164,7 +159,6 @@ function validateRuntimeConfig(input) {
   return {
     ok: true,
     value: {
-      schemaVersion: 1,
       amapApiKey,
       teslaMateApiBaseUrl: apiBaseUrlResult.value,
       teslaMateWebUrl: webUrlResult.value
@@ -173,56 +167,381 @@ function validateRuntimeConfig(input) {
 }
 
 /**
- * 从固定 Keychain 键读取并验证版本化运行配置。
+ * 验证 iCloud 正式文件使用的五字段 schema v1 envelope。
  *
- * 使用场景：main 在创建文件缓存或网络请求前执行配置门禁。无入参；成功返回标准化
- * 配置，键缺失、JSON 损坏、schema/字段非法或 Keychain API 异常均返回 null。读取
- * 与解析异常只记录固定分类日志，不泄露 Key、URL 或原始 JSON。
+ * 使用场景：正式、候选和备份文件在进入业务链或事务移动前都调用本方法。入参为任意
+ * 值；成功返回只含固定五字段的 `{ ok: true, value }`。schema、规范 ISO 时间或业务
+ * 字段非法时返回固定脱敏消息；额外字段不会进入结果。
  */
-function loadRuntimeConfig() {
-  try {
-    // contains 为 false 表示设备尚未配置，不调用 get，避免 Scriptable 对缺失键抛错。
-    if (!Keychain.contains(RUNTIME_CONFIG_KEY)) {
-      return null;
-    }
+function validateICloudConfigEnvelope(input) {
+  // envelope 必须是普通非数组对象，避免数组或原始值伪装成可读取配置。
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, message: "运行配置格式无效" };
+  }
+  // 当前仅理解 schema v1；未来版本必须由新代码显式迁移，不能猜测兼容。
+  if (input.schemaVersion !== 1) {
+    return { ok: false, message: "运行配置版本不受支持" };
+  }
+  // 更新时间必须先是字符串，才能安全传给 Date 并做逐字规范性比较。
+  if (typeof input.updatedAt !== "string") {
+    return { ok: false, message: "运行配置更新时间无效" };
+  }
+  const parsedUpdatedAt = new Date(input.updatedAt);
+  // 仅接受 Date 可解析且 `toISOString()` 逐字相同的 UTC 规范时间。
+  if (Number.isNaN(parsedUpdatedAt.getTime()) || parsedUpdatedAt.toISOString() !== input.updatedAt) {
+    return { ok: false, message: "运行配置更新时间无效" };
+  }
 
-    const storedValue = Keychain.get(RUNTIME_CONFIG_KEY);
-    const validationResult = validateRuntimeConfig(JSON.parse(storedValue));
-    // Keychain 中的内容即使可解析也必须重新验证；非法配置按读取失败统一降级。
-    if (!validationResult.ok) {
-      console.log("运行配置读取失败");
-      return null;
+  const businessResult = validateBusinessConfig(input);
+  // 业务字段错误已经是字段级脱敏消息，直接返回给 App 修复流程。
+  if (!businessResult.ok) {
+    return businessResult;
+  }
+  return {
+    ok: true,
+    value: {
+      schemaVersion: 1,
+      updatedAt: input.updatedAt,
+      amapApiKey: businessResult.value.amapApiKey,
+      teslaMateApiBaseUrl: businessResult.value.teslaMateApiBaseUrl,
+      teslaMateWebUrl: businessResult.value.teslaMateWebUrl
     }
-    return validationResult.value;
+  };
+}
+
+/**
+ * 创建一次 iCloud 配置操作使用的固定路径集合。
+ *
+ * 使用场景：读取、恢复和保存事务必须共享同一个 `FileManager.iCloud()` 实例与目录，
+ * 避免分别拼接路径造成跨根或文件名不一致。无入参；返回 manager、目录及正式、候选、
+ * 备份三个固定路径。Scriptable API 异常由调用方外层 catch 统一脱敏。
+ */
+function createICloudConfigStorage() {
+  const fm = FileManager.iCloud();
+  const directoryPath = fm.joinPath(fm.documentsDirectory(), "teslamate");
+  return {
+    fm,
+    directoryPath,
+    configPath: fm.joinPath(directoryPath, "config.v1.json"),
+    pendingPath: fm.joinPath(directoryPath, "config.v1.pending.json"),
+    backupPath: fm.joinPath(directoryPath, "config.v1.backup.json")
+  };
+}
+
+/**
+ * 读取一个 iCloud 配置文件并区分内容无效与存储暂不可用。
+ *
+ * 使用场景：正式、备份、候选安装后的写后读校验均复用本边界。入参为所属 iCloud
+ * manager 和文件绝对路径；成功返回 `{ status: "ready", value }`，JSON/schema/时间/
+ * 业务字段内容错误返回 `invalid`，底层读取异常返回 `unavailable`。日志只记录固定分类。
+ */
+function readAndValidateICloudConfig(fm, filePath) {
+  let serializedConfig;
+  try {
+    serializedConfig = fm.readString(filePath);
   }
   catch (error) {
-    // 固定日志刻意不记录异常对象，防止解析错误或系统错误间接包含敏感配置。
-    console.log("运行配置读取失败");
-    return null;
+    // 只有底层读取错误属于同步暂不可用；异常可能含路径或正文，日志保持固定分类。
+    console.log("运行配置读取暂时不可用");
+    return { status: "unavailable" };
+  }
+
+  try {
+    const parsed = JSON.parse(serializedConfig);
+    const validationResult = validateICloudConfigEnvelope(parsed);
+    // 可解析但不符合 envelope 规则属于用户可修复的 invalid，而不是同步暂不可用。
+    if (!validationResult.ok) {
+      console.log("运行配置内容无效");
+      return { status: "invalid" };
+    }
+    return { status: "ready", value: validationResult.value };
+  }
+  catch (error) {
+    // 文件已成功读取但 JSON 无法解析属于可修复内容错误，不能误报为下载暂不可用。
+    console.log("运行配置内容无效");
+    return { status: "invalid" };
   }
 }
 
 /**
- * 验证后将完整 schema v1 配置原子写入单个 Keychain 键。
+ * 只读旧 Keychain 配置并返回一次性迁移候选状态。
  *
- * 使用场景：Task 3 的 App 配置表单保存用户输入。入参为任意配置候选；验证成功且
- * Keychain.set 完成时返回 `{ ok: true, value }`，校验失败返回对应脱敏错误，写入异常
- * 返回通用失败。只序列化验证结果，额外字段、未标准化值和原始异常均不会写入或抛出。
+ * 使用场景：仅由 App 在正式与备份文件都缺失时调用；Widget 永无调用路径。无入参；
+ * 有效旧 schema v1 返回只含三个业务字段的 `legacyMigrationRequired`，缺键、内容无效或
+ * Keychain/JSON 异常分别返回 `missing`、`invalid`、`unavailable`。本方法绝不删除旧键。
  */
-function saveRuntimeConfig(input) {
-  const validationResult = validateRuntimeConfig(input);
-  // 校验失败时不得调用 Keychain.set，保证已有配置保持不变。
-  if (!validationResult.ok) {
-    return validationResult;
-  }
-
+function loadLegacyMigrationCandidate() {
   try {
-    Keychain.set(RUNTIME_CONFIG_KEY, JSON.stringify(validationResult.value));
-    return validationResult;
+    // 旧键不存在表示全新安装；不调用 get，避免 Scriptable 对缺失键抛异常。
+    if (!Keychain.contains(RUNTIME_CONFIG_KEY)) {
+      return { status: "missing" };
+    }
+    const parsed = JSON.parse(Keychain.get(RUNTIME_CONFIG_KEY));
+    const businessResult = validateBusinessConfig(parsed);
+    // 旧数据也必须明确是 schema v1 且业务字段有效，其他内容只允许用户重新修复。
+    if (parsed.schemaVersion !== 1 || !businessResult.ok) {
+      return { status: "invalid" };
+    }
+    return { status: "legacyMigrationRequired", value: businessResult.value };
   }
   catch (error) {
-    // 保存异常只返回固定消息，不记录错误对象或配置内容。
+    // Keychain 或 JSON 异常不得回显配置正文，仅记录固定旧配置分类。
+    console.log("旧运行配置读取失败");
+    return { status: "unavailable" };
+  }
+}
+
+/**
+ * 在 App 内验证并把唯一有效备份恢复为正式配置。
+ *
+ * 使用场景：正式文件缺失或内容无效且 backup 存在时，由 `loadRuntimeConfig(true)` 调用。
+ * 入参 `storage` 为同一 iCloud manager 路径集合；`invalidConfigInstalled` 指示是否需要先
+ * 删除无效正式文件。成功移动后必须重读正式文件；任一下载、删除、移动异常返回
+ * `unavailable`，备份内容无效或恢复后内容无效返回 `invalid`。绝不检查 Keychain。
+ */
+async function restoreBackupConfigInApp(storage, invalidConfigInstalled) {
+  try {
+    await storage.fm.downloadFileFromiCloud(storage.backupPath);
+    const backupResult = readAndValidateICloudConfig(storage.fm, storage.backupPath);
+    // 备份未通过完整读取校验时不得删除现有正式文件或移动任何工件。
+    if (backupResult.status !== "ready") {
+      return backupResult;
+    }
+    // 只有已验证备份可接管时才删除无效正式文件，避免恢复失败扩大数据损失。
+    if (invalidConfigInstalled) {
+      storage.fm.remove(storage.configPath);
+    }
+    storage.fm.move(storage.backupPath, storage.configPath);
+    return readAndValidateICloudConfig(storage.fm, storage.configPath);
+  }
+  catch (error) {
+    // 文件系统异常不携带到日志或 UI，调用方只获得暂不可用状态。
+    console.log("运行配置恢复失败");
+    return { status: "unavailable" };
+  }
+}
+
+/**
+ * 从 iCloud 固定正式文件加载运行配置状态。
+ *
+ * 使用场景：`main()` 的首个业务步骤，在任何本地缓存、Request 或 WebView 之前执行。
+ * 入参 `runsInApp` 决定是否允许下载、恢复备份及只读旧 Keychain 候选；Widget 仅读取已
+ * 下载正式文件，任何非 ready 状态都零下载、零 Keychain。外层 catch 覆盖 manager、
+ * 路径、存在性、下载状态和备份检查异常，并统一返回 `unavailable`。
+ */
+async function loadRuntimeConfig(runsInApp) {
+  try {
+    const storage = createICloudConfigStorage();
+    // 正式缺失时仅 App 可恢复备份或读取旧迁移候选，Widget 直接静态降级。
+    if (!storage.fm.fileExists(storage.configPath)) {
+      if (storage.fm.fileExists(storage.backupPath)) {
+        return runsInApp
+          ? await restoreBackupConfigInApp(storage, false)
+          : { status: "unavailable" };
+      }
+      return runsInApp ? loadLegacyMigrationCandidate() : { status: "missing" };
+    }
+    // App 主动请求系统下载；Widget 不触发下载，只接受系统已同步到本机的文件。
+    if (runsInApp) {
+      await storage.fm.downloadFileFromiCloud(storage.configPath);
+    }
+    else if (!storage.fm.isFileDownloaded(storage.configPath)) {
+      return { status: "unavailable" };
+    }
+
+    const configResult = readAndValidateICloudConfig(storage.fm, storage.configPath);
+    // 内容无效且存在备份时仅 App 可恢复；Widget 不读取备份，避免同步副作用。
+    if (configResult.status === "invalid" && storage.fm.fileExists(storage.backupPath)) {
+      return runsInApp
+        ? await restoreBackupConfigInApp(storage, true)
+        : { status: "unavailable" };
+    }
+    return configResult;
+  }
+  catch (error) {
+    // 任何 iCloud API 异常都只记录固定分类，错误对象可能包含路径或文件内容。
+    console.log("运行配置暂时不可用");
+    return { status: "unavailable" };
+  }
+}
+
+/**
+ * 用已验证业务配置和规范时间创建五字段 iCloud envelope。
+ *
+ * 使用场景：保存事务只允许把白名单字段写入 pending。入参 `input` 为
+ * `validateBusinessConfig()` 的 value，`updatedAt` 为当前规范 ISO 字符串；返回显式
+ * 五字段对象。方法不使用对象展开，兼容 Scriptable JavaScriptCore ES6。
+ */
+function createICloudConfigEnvelope(input, updatedAt) {
+  return {
+    schemaVersion: 1,
+    updatedAt,
+    amapApiKey: input.amapApiKey,
+    teslaMateApiBaseUrl: input.teslaMateApiBaseUrl,
+    teslaMateWebUrl: input.teslaMateWebUrl
+  };
+}
+
+/**
+ * 逐字段比较两个已验证 iCloud envelope。
+ *
+ * 使用场景：pending 与正式文件写后读必须和本次候选完全一致，JSON 字段顺序或额外字段
+ * 不应影响比较。入参为两个 envelope；五字段均严格相等时返回 true，否则返回 false。
+ */
+function configsEqual(left, right) {
+  return left.schemaVersion === right.schemaVersion &&
+    left.updatedAt === right.updatedAt &&
+    left.amapApiKey === right.amapApiKey &&
+    left.teslaMateApiBaseUrl === right.teslaMateApiBaseUrl &&
+    left.teslaMateWebUrl === right.teslaMateWebUrl;
+}
+
+/**
+ * 尽力删除保存事务工件且不传播底层错误。
+ *
+ * 使用场景：成功清理 backup、失败清理 candidate 或 finally 清理 pending。入参为 iCloud
+ * manager 和固定工件路径；无返回值。文件不存在时不调用 remove；检查或删除失败只记录
+ * 固定分类，因为清理失败不能覆盖事务的主返回结果。
+ */
+function tryRemoveConfigArtifact(fm, filePath) {
+  try {
+    // 只删除确实存在的固定工件，避免无意义的 FileManager 异常扩大失败面。
+    if (fm.fileExists(filePath)) {
+      fm.remove(filePath);
+    }
+  }
+  catch (error) {
+    // 文件路径或系统错误可能含隐私，只保留固定清理分类。
+    console.log("运行配置工件清理失败");
+  }
+}
+
+/**
+ * 在写入新 pending 前收敛上次中断留下的事务工件。
+ *
+ * 使用场景：`saveRuntimeConfig()` 每次保存的第一步。入参为同一 iCloud 存储集合；返回
+ * Promise<void>。方法创建固定目录、清理旧 pending；正式与 backup 同在时先验证正式，
+ * 只有 ready 才删除过期 backup，否则复用完整备份恢复。正式缺失但 backup 存在时也先
+ * 恢复；任何非 ready 恢复结果抛内部固定 Error，由保存外层转换为统一失败。
+ */
+async function prepareICloudSave(storage) {
+  // 配置目录只在 App 明确保存时创建，Widget 读取路径永不创建目录。
+  if (!storage.fm.isDirectory(storage.directoryPath)) {
+    storage.fm.createDirectory(storage.directoryPath);
+  }
+  // 遗留 pending 必须在新写入前严格删除；清理失败时停止事务，不能依赖覆盖语义。
+  if (storage.fm.fileExists(storage.pendingPath)) {
+    storage.fm.remove(storage.pendingPath);
+  }
+
+  const configExists = storage.fm.fileExists(storage.configPath);
+  const backupExists = storage.fm.fileExists(storage.backupPath);
+  // 正式与备份并存代表上次事务可能中断；必须依据正式文件完整校验决定清理或恢复。
+  if (configExists && backupExists) {
+    const configResult = readAndValidateICloudConfig(storage.fm, storage.configPath);
+    if (configResult.status === "ready") {
+      // 正式文件有效时 backup 是过期工件；删除失败必须停止，防止后续 move 覆盖旧工件。
+      storage.fm.remove(storage.backupPath);
+      return;
+    }
+    // 正式文件只有内容明确 invalid 才允许由备份接管；读取 unavailable 时停止以免误删。
+    if (configResult.status !== "invalid") {
+      throw new Error("config-read-unavailable");
+    }
+    const restoreResult = await restoreBackupConfigInApp(storage, true);
+    // 恢复不是 ready 时不得继续写 pending 或安装新候选。
+    if (restoreResult.status !== "ready") {
+      throw new Error("backup-restore-failed");
+    }
+    return;
+  }
+  // 正式缺失而 backup 存在时，先恢复上次事务的有效旧值，再开始本次保存。
+  if (!configExists && backupExists) {
+    const restoreResult = await restoreBackupConfigInApp(storage, false);
+    if (restoreResult.status !== "ready") {
+      throw new Error("backup-restore-failed");
+    }
+  }
+}
+
+/**
+ * 通过 pending/backup 双标志事务保存 iCloud 运行配置。
+ *
+ * 使用场景：App 表单或旧 Keychain 迁移经用户确认后调用。入参为任意业务配置；成功返回
+ * `{ ok: true, value }`，value 是完成两次写后读校验的五字段 envelope；校验或任何 iCloud
+ * 步骤失败返回固定脱敏结果。`backupCreatedByTransaction` 仅在正式成功移到 backup 后置位，
+ * `candidateInstalled` 仅在 pending 成功安装后置位，失败清理严格依据本次事务状态，绝不
+ * 误删未安装候选前的正式文件。方法不使用 Node API，不访问 Keychain。
+ */
+async function saveRuntimeConfig(input) {
+  const businessResult = validateBusinessConfig(input);
+  // 业务校验失败时不创建目录、不写任何工件，保留现有配置逐字不变。
+  if (!businessResult.ok) {
+    return businessResult;
+  }
+
+  const candidate = createICloudConfigEnvelope(
+    businessResult.value,
+    new Date().toISOString()
+  );
+  let storage;
+  try {
+    storage = createICloudConfigStorage();
+  }
+  catch (error) {
+    // manager 或路径构造失败也必须转换为固定保存失败，不能向 UI 抛系统详情。
+    console.log("运行配置保存失败");
     return { ok: false, message: "运行配置保存失败" };
+  }
+
+  let backupCreatedByTransaction = false;
+  let candidateInstalled = false;
+  try {
+    await prepareICloudSave(storage);
+    storage.fm.writeString(storage.pendingPath, JSON.stringify(candidate));
+    const pendingResult = readAndValidateICloudConfig(storage.fm, storage.pendingPath);
+    // pending 必须内容有效且逐字段等于内存候选，任何差异都停止在安装之前。
+    if (pendingResult.status !== "ready" || !configsEqual(pendingResult.value, candidate)) {
+      throw new Error("pending-validation-failed");
+    }
+
+    // 只有正式确实存在时才创建本次 backup；move 成功后立即置位供 catch 精确恢复。
+    if (storage.fm.fileExists(storage.configPath)) {
+      storage.fm.move(storage.configPath, storage.backupPath);
+      backupCreatedByTransaction = true;
+    }
+    storage.fm.move(storage.pendingPath, storage.configPath);
+    candidateInstalled = true;
+
+    const finalResult = readAndValidateICloudConfig(storage.fm, storage.configPath);
+    // 正式写后读必须再次完整校验并逐字段匹配，防止同步或文件系统窗口产生静默错写。
+    if (finalResult.status !== "ready" || !configsEqual(finalResult.value, candidate)) {
+      throw new Error("final-validation-failed");
+    }
+    tryRemoveConfigArtifact(storage.fm, storage.backupPath);
+    return { ok: true, value: candidate };
+  }
+  catch (error) {
+    // 只有本次候选确实安装后才删除正式文件，候选尚未安装时绝不触碰正式路径。
+    if (candidateInstalled) {
+      tryRemoveConfigArtifact(storage.fm, storage.configPath);
+    }
+    // 只有本次事务确实创建了 backup 才尝试恢复，不能移动既有或无关 backup。
+    if (backupCreatedByTransaction) {
+      try {
+        storage.fm.move(storage.backupPath, storage.configPath);
+      }
+      catch (restoreError) {
+        // 恢复错误不记录对象，候选也不得因恢复失败被调用方继续使用。
+        console.log("运行配置恢复失败");
+      }
+    }
+    console.log("运行配置保存失败");
+    return { ok: false, message: "运行配置保存失败" };
+  }
+  finally {
+    // pending 无论成功、失败或已移动均尽力清理；该清理不改变主事务返回值。
+    tryRemoveConfigArtifact(storage.fm, storage.pendingPath);
   }
 }
 
@@ -273,7 +592,7 @@ async function presentConfigForm(initialConfig) {
   while (true) {
     const form = new Alert();
     form.title = "管理配置";
-    form.message = "配置将保存在 iOS Keychain 中";
+    form.message = "配置将保存在 iCloud Drive 中";
     form.addSecureTextField("高德 API Key", formValues.amapApiKey);
     form.addTextField("TeslaMateApi 基础 URL", formValues.teslaMateApiBaseUrl);
     form.addTextField("TeslaMate Web URL", formValues.teslaMateWebUrl);
@@ -292,7 +611,7 @@ async function presentConfigForm(initialConfig) {
       teslaMateApiBaseUrl: form.textFieldValue(1),
       teslaMateWebUrl: form.textFieldValue(2)
     };
-    const validationResult = validateRuntimeConfig(candidate);
+    const validationResult = validateBusinessConfig(candidate);
     // 校验失败时保留未标准化原始输入，方便用户只修正错误字段；提示不回显具体值。
     if (!validationResult.ok) {
       formValues = candidate;
@@ -300,15 +619,50 @@ async function presentConfigForm(initialConfig) {
       continue;
     }
 
-    const saveResult = saveRuntimeConfig(validationResult.value);
-    // 候选已通过校验，此处失败只代表 Keychain 写入异常；旧值由配置核心保证不变。
+    const saveResult = await saveRuntimeConfig(validationResult.value);
+    // 候选已通过校验，此处失败只代表 iCloud 事务失败；旧值由双标志算法尽力恢复。
     if (!saveResult.ok) {
       await presentMessage("保存失败", "无法保存配置，请稍后重试");
       return null;
     }
 
-    await presentMessage("保存成功", "配置已安全保存");
+    await presentMessage("保存成功", "已保存到 iCloud Drive，将由系统同步到其他设备");
     return saveResult.value;
+  }
+}
+
+/**
+ * 展示正式与备份都缺失时的明确 App 创建入口。
+ *
+ * 使用场景：全新安装或 iCloud 尚未出现配置文件时调用。无入参；菜单固定为“重试同步 / 创建
+ * 新配置 / 取消”。重试后仍 missing 会通过 while 重新展示，不递归；创建才进入空表单。
+ * 返回重试得到的非 missing 状态，创建、取消或保存完成返回 null；调用方本次运行均不进入
+ * 业务链，避免刚保存的内存候选绕过下一次正式读取门禁。
+ */
+async function presentMissingConfigMenu() {
+  while (true) {
+    const menu = new Alert();
+    menu.title = "尚未找到 iCloud 配置";
+    menu.message = "可以重试同步，或明确创建一份新配置";
+    menu.addAction("重试同步");
+    menu.addAction("创建新配置");
+    menu.addCancelAction("取消");
+    const actionIndex = await menu.presentSheet();
+
+    // 固定下标 1 是唯一创建入口；保存结果只影响下次脚本运行。
+    if (actionIndex === 1) {
+      await presentConfigForm(null);
+      return null;
+    }
+    // 取消及越界响应直接结束，不读取表单、不创建配置目录。
+    if (actionIndex !== 0) {
+      return null;
+    }
+    const retryResult = await loadRuntimeConfig(true);
+    // iCloud 仍缺失时重新展示同一菜单；其他状态交回 main 的状态分派处理。
+    if (retryResult.status !== "missing") {
+      return retryResult;
+    }
   }
 }
 
@@ -334,14 +688,14 @@ function createRuntimeContext() {
 /**
  * 渲染配置不可用时的无副作用 Widget 提示并结束脚本。
  *
- * 使用场景：中号桌面和 accessoryCircular 锁屏入口在 Keychain 配置不可用时调用。
+ * 使用场景：中号桌面和 accessoryCircular 锁屏入口在 iCloud 配置非 ready 时调用。
  * 入参为当前 widget family；返回创建的 ListWidget，便于调用方或测试观察。该方法只
  * 创建提示 Widget，不访问 FileManager 或网络；Scriptable API 异常原样抛出。
  */
-function renderMissingConfigWidget(widgetFamily) {
+function renderUnavailableConfigWidget(widgetFamily) {
   const widget = new ListWidget();
   widget.setPadding(12, 12, 12, 12);
-  const message = widget.addText("请在 Scriptable 中运行脚本完成配置");
+  const message = widget.addText("等待 iCloud 配置同步，请在 Scriptable 中运行脚本检查配置");
   message.font = Font.mediumSystemFont(12);
   message.lineLimit = 3;
   Script.setWidget(widget);
@@ -355,6 +709,150 @@ function renderMissingConfigWidget(widgetFamily) {
   }
   Script.complete();
   return widget;
+}
+
+/**
+ * 展示 iCloud 配置暂不可用时唯一安全的 App 菜单。
+ *
+ * 使用场景：下载、文件系统或恢复步骤失败后，App 不能创建或修复配置以免覆盖仍在同步的
+ * 文件。无入参；菜单只提供“重试同步”和取消，选择重试返回 true，取消返回 false。
+ */
+async function presentUnavailableConfigMenu() {
+  const menu = new Alert();
+  menu.title = "iCloud 配置暂不可用";
+  menu.message = "请确认 iCloud Drive 已启用并稍后重试";
+  menu.addAction("重试同步");
+  menu.addCancelAction("取消");
+  const actionIndex = await menu.presentSheet();
+  // 固定下标 0 表示显式重试；取消及越界响应均不得执行其他配置动作。
+  return actionIndex === 0;
+}
+
+/**
+ * 展示 iCloud 正式配置内容无效时的 App 修复菜单。
+ *
+ * 使用场景：正式文件已读取但 JSON、schema、时间或业务字段非法且没有可恢复备份。
+ * 无入参；动作固定为“重试读取 / 修复配置 / 取消”。返回 `retry`、`repair` 或 null，
+ * 调用方通过动作字符串控制循环；本方法不读取、不删除也不覆盖配置文件。
+ */
+async function presentInvalidConfigMenu() {
+  const menu = new Alert();
+  menu.title = "iCloud 配置无效";
+  menu.message = "可以重试读取，或明确创建修复后的配置";
+  menu.addAction("重试读取");
+  menu.addAction("修复配置");
+  menu.addCancelAction("取消");
+  const actionIndex = await menu.presentSheet();
+  // 固定下标 0 只表示重新读取，不允许同时进入修复表单。
+  if (actionIndex === 0) {
+    return "retry";
+  }
+  // 固定下标 1 是唯一修复入口；取消和越界响应统一返回 null。
+  if (actionIndex === 1) {
+    return "repair";
+  }
+  return null;
+}
+
+/**
+ * 显示一次性旧 Keychain 配置迁移确认并执行验证后删除。
+ *
+ * 使用场景：仅 App 在正式与备份都缺失、旧 schema v1 候选有效时调用。入参
+ * `legacyConfig` 是只含三个业务字段的白名单候选；用户确认后先走完整 iCloud 保存事务，
+ * 再重新从正式文件加载并与保存 envelope 逐字段比较，全部成功后才删除旧键。取消不改
+ * 任何存储；保存、复读、比较或删除任一步失败都显示固定“迁移失败”、保留旧键并结束，
+ * 不把候选或新正式文件用于本次业务链。
+ */
+async function presentLegacyMigrationPrompt(legacyConfig) {
+  const prompt = new Alert();
+  prompt.title = "迁移旧配置";
+  prompt.message = "检测到旧配置，可以迁移到 iCloud Drive";
+  prompt.addAction("迁移到 iCloud Drive");
+  prompt.addCancelAction("取消");
+  const actionIndex = await prompt.presentAlert();
+  // 只有固定下标 0 表示用户确认；取消时绝不创建目录、写文件或删除旧键。
+  if (actionIndex !== 0) {
+    return { status: "unavailable" };
+  }
+
+  const saveResult = await saveRuntimeConfig(legacyConfig);
+  // iCloud 事务失败时旧键仍是唯一迁移源，必须保留并用固定提示结束本次运行。
+  if (!saveResult.ok) {
+    await presentMessage("迁移失败", "无法迁移旧配置，请稍后重试");
+    return { status: "unavailable" };
+  }
+
+  const verifiedResult = await loadRuntimeConfig(true);
+  // 删除旧键前必须重新通过正式读取门禁，且五字段逐项等于本次保存的候选。
+  if (verifiedResult.status !== "ready" ||
+    !configsEqual(verifiedResult.value, saveResult.value)) {
+    await presentMessage("迁移失败", "无法验证 iCloud 配置，请稍后重试");
+    return { status: "unavailable" };
+  }
+
+  try {
+    Keychain.remove(RUNTIME_CONFIG_KEY);
+  }
+  catch (error) {
+    // 正式文件已经有效时不回滚；旧键成为不可达遗留，下次 ready 路径不会再访问它。
+    console.log("旧运行配置清理失败");
+    await presentMessage("迁移失败", "iCloud 配置已保存，但旧配置清理失败");
+    return { status: "unavailable" };
+  }
+  await presentMessage("迁移成功", "旧配置已迁移到 iCloud Drive");
+  return { status: "ready", value: verifiedResult.value };
+}
+
+/**
+ * 在 App 内通过循环分派所有非 ready 配置状态。
+ *
+ * 使用场景：`main()` 首次加载得到 missing、invalid、unavailable 或
+ * legacyMigrationRequired 时调用。入参为初始状态结果；无业务返回值。重试通过 while
+ * 更新当前状态，不递归；创建、修复、迁移、取消或重试变为 ready 后都结束本次运行，
+ * 确保保存候选不会绕过下一次脚本启动的正式读取门禁。
+ */
+async function presentNonReadyConfigInApp(initialResult) {
+  let currentResult = initialResult;
+  while (currentResult.status !== "ready") {
+    // missing 菜单自身负责“仍 missing”的循环，返回值只可能是其他状态或 null。
+    if (currentResult.status === "missing") {
+      const retryResult = await presentMissingConfigMenu();
+      if (!retryResult) {
+        return;
+      }
+      currentResult = retryResult;
+      continue;
+    }
+    // unavailable 只能重试或取消，永远不提供创建/修复动作以免覆盖仍在同步的文件。
+    if (currentResult.status === "unavailable") {
+      const shouldRetry = await presentUnavailableConfigMenu();
+      if (!shouldRetry) {
+        return;
+      }
+      currentResult = await loadRuntimeConfig(true);
+      continue;
+    }
+    // invalid 只有明确修复才打开空表单；重试仅重新加载并回到状态循环。
+    if (currentResult.status === "invalid") {
+      const invalidAction = await presentInvalidConfigMenu();
+      if (invalidAction === "repair") {
+        await presentConfigForm(null);
+        return;
+      }
+      if (invalidAction !== "retry") {
+        return;
+      }
+      currentResult = await loadRuntimeConfig(true);
+      continue;
+    }
+    // 旧候选只通过确认迁移流程处理，完成或失败后本次运行都立即结束。
+    if (currentResult.status === "legacyMigrationRequired") {
+      await presentLegacyMigrationPrompt(currentResult.value);
+      return;
+    }
+    // 防御未知状态：不猜测兼容、不进入业务链，直接安全结束交互。
+    return;
+  }
 }
 
 /**
@@ -397,7 +895,7 @@ async function openTeslaMateWebView(runtimeConfig, carId) {
 /**
  * 展示已配置 App 的操作菜单，并按固定动作下标打开页面或进入配置管理。
  *
- * 使用场景：Scriptable 在 App 内运行且 Keychain 配置已验证。入参为标准化
+ * 使用场景：Scriptable 在 App 内运行且 iCloud 正式配置已验证。入参为标准化
  * `runtimeConfig` 和当前 `carId`；无业务返回值。菜单固定使用 sheet，动作下标 0
  * 调用 WebView，下标 1 调用配置表单，取消或任何其他返回值直接结束；下游异常原样
  * 抛出，调用方负责完成 Script 生命周期。
@@ -1291,26 +1789,25 @@ Script.complete();
 /**
  * 执行 Scriptable App 或 Widget 的单一运行入口。
  *
- * 使用场景：脚本顶层仅调用一次。无入参；无业务返回值。方法先读取并验证 Keychain
- * 配置，再按 App、accessory 或中号上下文分流。配置不可用时 Widget 只显示提示，App
- * 直接进入首次配置表单；只有有效 Widget 配置才创建文件缓存运行上下文。App 已配置
- * 时先展示操作菜单，交互完成后统一结束 Script 生命周期。
+ * 使用场景：脚本顶层仅调用一次。无入参；无业务返回值。方法首句异步读取 iCloud 配置
+ * 状态，再按 App、accessory 或中号上下文分流。只有 ready 才创建本地缓存、WebView 或
+ * Request；Widget 的其余状态统一显示同步提示。App 非 ready 交互由状态分支处理并在本次
+ * 运行结束后重新启动才允许进入业务链。
  */
 async function main() {
-  const runtimeConfig = loadRuntimeConfig();
+  const configResult = await loadRuntimeConfig(config.runsInApp);
   const carId = params.find((item) => /^\d+$/.test(item)) || 1;
 
-  // 配置不可用时禁止创建缓存与请求；App 直接配置，Widget 仅显示无副作用提示。
-  if (!runtimeConfig) {
-    // App 首次运行优先进入表单，避免依赖不存在的配置创建 WebView 或文件缓存。
+  // 非 ready 状态必须在任何业务对象创建前结束；App 按状态提供受限安全交互。
+  if (configResult.status !== "ready") {
     if (config.runsInApp) {
-      await presentConfigForm(null);
+      await presentNonReadyConfigInApp(configResult);
       Script.complete();
       return;
     }
     // 非 App 的 Widget 上下文无法交互，只渲染引导用户回到 Scriptable 的提示。
     if (config.runsInWidget || config.runsInAccessoryWidget) {
-      renderMissingConfigWidget(config.widgetFamily);
+      renderUnavailableConfigWidget(config.widgetFamily);
       return;
     }
     Script.complete();
@@ -1319,7 +1816,7 @@ async function main() {
 
   // App 路径只展示操作菜单及其下游界面，不创建 Widget 文件缓存。
   if (config.runsInApp) {
-    await presentAppMenu(runtimeConfig, carId);
+    await presentAppMenu(configResult.value, carId);
     Script.complete();
     return;
   }
@@ -1327,11 +1824,11 @@ async function main() {
   const runtimeContext = createRuntimeContext();
   // accessory Widget 使用独立圆形布局；其他 Widget family 继续渲染中号布局。
   if (config.runsInAccessoryWidget) {
-    await renderAccessoryWidget(runtimeContext, runtimeConfig, carId);
+    await renderAccessoryWidget(runtimeContext, configResult.value, carId);
     return;
   }
 
-  await renderMediumWidget(runtimeContext, runtimeConfig, carId);
+  await renderMediumWidget(runtimeContext, configResult.value, carId);
 }
 
 await main();
