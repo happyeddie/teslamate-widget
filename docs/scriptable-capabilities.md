@@ -13,7 +13,6 @@
 - `Keychain` 凭据安全存储：https://docs.scriptable.app/keychain/
 - `Alert` 原生弹窗、表单和 Action Sheet：https://docs.scriptable.app/alert/
 - `args` 输入与 URL 查询参数：https://docs.scriptable.app/args/
-- `URLScheme` 当前脚本运行链接：https://docs.scriptable.app/urlscheme/
 - `Request` HTTP 请求：https://docs.scriptable.app/request/
 - `Location` 定位与反向地理编码：https://docs.scriptable.app/location/
 - `DrawContext` 绘图：https://docs.scriptable.app/drawcontext/
@@ -53,9 +52,8 @@
 
 | 能力 | 当前用途 | 当前代码位置 |
 | --- | --- | --- |
-| `args.widgetParameter` | 解析车 ID 和主题参数 | `Telsa Car.js` 的 `parseWidgetParameters()` / `main()` |
+| `args.widgetParameter` / `args.queryParameters` | 解析车 ID 和主题参数；非空 Widget 参数用于识别原生点击运行，查询动作仅兼容已归档的旧 URL 快照 | `Telsa Car.js` 的 `parseWidgetParameters()` / `isWidgetTriggeredAppRun()` / `resolveCarId()` |
 | `config.runsInApp` | `main()` 中先执行配置门禁；missing 先显示重试/创建/取消，旧设备显示迁移确认；ready 的 Widget 点击直接打开 TeslaMate，App 手动运行显示管理或打开菜单 | `Telsa Car.js` 的 `main()` / `presentNonReadyConfigInApp()` / `presentAppMenu()` |
-| `URLScheme.forRunningScript()` / `args.queryParameters` | 为 ready Widget 生成带固定动作标记的点击 URL，并在 App 内区分 Widget 点击与手动运行；非空 `args.widgetParameter` 兼容未刷新的旧 Widget 快照 | `Telsa Car.js` 的 `createWidgetOpenUrl()` / `isWidgetTriggeredAppRun()` |
 | `config.runsInAccessoryWidget` | `main()` 中：通过配置门禁后进入锁屏 accessory widget 渲染分支 | `main()` 的 accessory 分支 |
 | `FileManager.iCloud()` | 构造正式、pending 与 backup 固定路径，并执行读取、恢复与保存事务 | `Telsa Car.js` 的 `createICloudConfigStorage()` / `loadRuntimeConfig()` / `saveRuntimeConfig()` |
 | `FileManager.createDirectory(path, true)` | App 明确保存时递归创建 `teslamate/` 配置目录 | `Telsa Car.js` 的 `prepareICloudSave()` |

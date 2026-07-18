@@ -1152,10 +1152,6 @@ async function runScriptableScript(options = {}) {
       }
     },
     Size,
-    URLScheme: {
-      // 返回稳定的当前脚本运行 URL，供 Widget 点击来源标记测试精确断言。
-      forRunningScript: () => "scriptable:///run/Telsa%20Car"
-    },
     WebView,
     encodeURI
   };

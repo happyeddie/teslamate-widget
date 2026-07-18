@@ -51,7 +51,7 @@ A [Scriptable](https://scriptable.app/) widget script for TeslaMate. It shows ve
 
 The three values are saved as one versioned configuration file in Scriptable's iCloud Drive documents. They are never written into the script. This does not add an application "master password": access is controlled by your Apple Account and trusted devices. Treat every trusted device signed in to that Apple Account as able to read this configuration.
 
-Tapping a configured widget opens the current vehicle's TeslaMate page directly without an action menu. To update an existing configuration, manually run the script in the Scriptable app, choose **Manage Configuration**, edit the values, and save; the same menu also provides **Open TeslaMate**. A safe configuration menu is still shown when setup is incomplete, migration is required, or the iCloud configuration has an error. Configuration dialogs are never shown from a widget refresh.
+Tapping a configured widget uses Scriptable's native script interaction to open the current vehicle's TeslaMate page directly without an action menu. After the page is dismissed, Scriptable can refresh the widget through that native interaction. To update an existing configuration, manually run the script in the Scriptable app, choose **Manage Configuration**, edit the values, and save; the same menu also provides **Open TeslaMate**. A safe configuration menu is still shown when setup is incomplete, migration is required, or the iCloud configuration has an error. Configuration dialogs are never shown from a widget refresh.
 
 Cache files are stored in the `tesla/` folder under Scriptable documents.
 

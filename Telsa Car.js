@@ -850,28 +850,14 @@ async function presentMissingConfigMenu() {
 }
 
 /**
- * 生成已配置 Widget 点击后重新运行当前脚本的显式 URL。
- *
- * 使用场景：正常 Widget 需要在被点击后携带来源标记进入 App，以绕过手动运行时的管理
- * 菜单。入参 `carId` 为已按纯数字规则解析的车辆 ID；返回 Scriptable 当前脚本 URL，
- * 并安全选择 `?` 或 `&` 拼接固定动作及车辆参数。URL 不包含车辆地址、API Key 或其他
- * 私密业务配置。
- */
-function createWidgetOpenUrl(carId) {
-  const scriptUrl = URLScheme.forRunningScript();
-  const separator = scriptUrl.indexOf("?") === -1 ? "?" : "&";
-  return `${scriptUrl}${separator}teslamateWidgetAction=open&teslamateCarId=${carId}`;
-}
-
-/**
  * 惰性创建正常 Widget 所需的文件缓存与渲染对象。
  *
  * 使用场景：仅在运行配置通过门禁后调用，确保首次未配置或读取失败不会创建 tesla
- * 缓存目录。入参 `carId` 为当前纯数字车辆 ID，用于生成可保留车辆选择的 Widget 点击
- * URL；返回 `{ fm, fileRoot, widget }`。FileManager 或目录创建异常原样抛出交由
- * Scriptable 报告，因为此时配置已有效且无法安全继续正常渲染。
+ * 缓存目录。无入参；返回 `{ fm, fileRoot, widget }`。根 Widget 不设置 `url`，保留
+ * Scriptable 原生“点击时运行脚本”及其完成后的刷新行为。FileManager 或目录创建异常
+ * 原样抛出交由 Scriptable 报告，因为此时配置已有效且无法安全继续正常渲染。
  */
-function createRuntimeContext(carId) {
+function createRuntimeContext() {
   const fm = FileManager.local();
   const fileRoot = fm.joinPath(fm.documentsDirectory(), "tesla");
   // 仅在缓存根目录不存在时创建；已有目录必须复用以支持离线车辆与地图缓存。
@@ -879,8 +865,6 @@ function createRuntimeContext(carId) {
     fm.createDirectory(fileRoot);
   }
   const widget = new ListWidget();
-  // 仅 ready Widget 设置点击动作；非 ready Widget 保持默认运行脚本，从而展示配置菜单。
-  widget.url = createWidgetOpenUrl(carId);
   widget.setPadding(0, 0, 0, 0);
   return { fm, fileRoot, widget };
 }
@@ -1099,7 +1083,7 @@ async function openTeslaMateWebView(runtimeConfig, carId) {
 }
 
 /**
- * 判断本次 App 运行是否由 Widget 的显式点击 URL 发起。
+ * 判断本次 App 运行是否由已归档的旧 Widget 显式点击 URL 发起。
  *
  * 使用场景：Scriptable 点击 Widget 后同样会进入 `config.runsInApp`，仅凭运行上下文无法
  * 区分手动运行与 Widget 点击。无入参；仅当 URL 查询参数中的固定动作值为 `open` 时返回
@@ -1113,22 +1097,23 @@ function isWidgetOpenAction() {
 /**
  * 判断已配置脚本的 App 运行是否应按 Widget 点击直接打开车辆页面。
  *
- * 使用场景：新版 Widget 使用显式 URL 动作；iOS 尚未刷新点击 URL 的旧 Widget 快照仍会
- * 通过 `args.widgetParameter` 传递车辆参数。无入参；任一来源信号存在即返回 true，二者
- * 都不存在时返回 false 并保留 Scriptable App 手动运行的配置管理菜单。该兼容判断只在
- * `ready` 门禁之后使用，因此未配置或异常配置仍进入原有安全菜单。
+ * 使用场景：当前 Widget 依赖 Scriptable 原生点击运行并通过 `args.widgetParameter`
+ * 传递车辆参数；已经归档了旧版显式 URL 的 Widget 快照仍可能携带查询动作。无入参；
+ * 任一来源信号存在即返回 true，二者都不存在时返回 false 并保留 Scriptable App 手动
+ * 运行的配置管理菜单。该兼容判断只在 `ready` 门禁之后使用，因此未配置或异常配置仍
+ * 进入原有安全菜单。
  */
 function isWidgetTriggeredAppRun() {
   return isWidgetOpenAction() || Boolean(args.widgetParameter);
 }
 
 /**
- * 解析本次运行应使用的车辆 ID，并在 Widget 点击时优先读取 URL 中的显式车辆标记。
+ * 解析本次运行应使用的车辆 ID，并在旧 Widget 快照点击时读取 URL 中的车辆标记。
  *
- * 使用场景：`ListWidget.url` 重新运行脚本时不依赖 `args.widgetParameter` 被系统继续传递。
- * 无入参；Widget 点击动作存在且 `teslamateCarId` 为纯数字时返回该字符串，否则返回原
- * Widget 参数中的首个纯数字标记，均不存在时返回数字 1。只接受纯数字可阻止查询参数
- * 注入 URL、选择器或文件路径语义。
+ * 使用场景：已归档的旧版 `ListWidget.url` 快照重新运行脚本时，不依赖系统继续传递
+ * `args.widgetParameter`。无入参；旧 Widget 点击动作存在且 `teslamateCarId` 为纯数字时
+ * 返回该字符串，否则返回原 Widget 参数中的首个纯数字标记，均不存在时返回数字 1。
+ * 只接受纯数字可阻止查询参数注入 URL、选择器或文件路径语义。
  */
 function resolveCarId() {
   const queryCarId = args.queryParameters && args.queryParameters.teslamateCarId;
@@ -2112,7 +2097,7 @@ async function main() {
     return;
   }
 
-  // 已配置 Widget 点击应直接打开车辆页面；同时兼容尚未刷新显式 URL 的旧 Widget 快照。
+  // 已配置 Widget 原生点击应直接打开车辆页面；查询动作仅兼容已归档的旧 URL 快照。
   if (config.runsInApp) {
     if (isWidgetTriggeredAppRun()) {
       await openTeslaMateWebView(configResult.value, carId);
@@ -2125,7 +2110,7 @@ async function main() {
     return;
   }
 
-  const runtimeContext = createRuntimeContext(carId);
+  const runtimeContext = createRuntimeContext();
   // accessory Widget 使用独立圆形布局；其他 Widget family 继续渲染中号布局。
   if (config.runsInAccessoryWidget) {
     await renderAccessoryWidget(runtimeContext, configResult.value, carId);

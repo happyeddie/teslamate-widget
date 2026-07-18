@@ -794,12 +794,13 @@ test("锁屏 accessory widget 可以完成圆形电量图渲染", async (t) => {
 });
 
 /**
- * 验证已配置 Widget 会生成带来源标记的脚本运行 URL。
+ * 验证已配置 Widget 不覆盖 Scriptable 原生的点击运行行为。
  *
- * 使用场景：iOS 点击 Widget 时必须把下一次 App 运行与手动运行区分开。入参为 node:test
- * 上下文；无返回值。测试断言点击目标仍为当前脚本，同时携带固定动作参数。
+ * 使用场景：`ListWidget.url` 会覆盖 Widget 配置中的原生脚本交互，使关闭 WebView 后不再
+ * 由点击触发 Widget 刷新。入参为 node:test 上下文；无返回值。测试断言根 Widget 不设置
+ * 自定义 URL，点击来源继续由 Scriptable 传递的 Widget 参数识别。
  */
-test("已配置 Widget 点击 URL 带有直接打开标记", async (t) => {
+test("已配置 Widget 保留原生点击运行行为", async (t) => {
   const result = await runScriptableScript({
     ...readyICloudFixture(),
     jsonResponse: apiResponse(carStatus("online")),
@@ -808,10 +809,7 @@ test("已配置 Widget 点击 URL 带有直接打开标记", async (t) => {
   });
   cleanupRuntimeDirectories(t, result);
 
-  assert.equal(
-    result.widget.url,
-    "scriptable:///run/Telsa%20Car?teslamateWidgetAction=open&teslamateCarId=2"
-  );
+  assert.equal(result.widget.url, undefined);
 });
 
 /**
@@ -848,11 +846,11 @@ test("App 操作菜单选择打开 TeslaMate 时展示当前车辆 WebView", asy
 /**
  * 验证从已配置 Widget 点击进入 App 时直接打开 TeslaMate，不插入管理菜单。
  *
- * 使用场景：Widget 的点击 URL 通过查询参数标记本次 App 运行来自 Widget。入参为
- * node:test 上下文；无返回值。测试不提供 Alert 响应，确保生产路径若误弹任何菜单会
- * 立即失败，同时断言车辆 WebView 仍正常展示。
+ * 使用场景：已归档的旧 URL Widget 快照通过查询参数标记本次 App 运行来自 Widget。
+ * 入参为 node:test 上下文；无返回值。测试不提供 Alert 响应，确保生产路径若误弹任何
+ * 菜单会立即失败，同时断言车辆 WebView 仍正常展示。
  */
-test("已配置 Widget 点击进入 App 时直接打开 TeslaMate", async (t) => {
+test("旧 URL Widget 快照点击进入 App 时直接打开 TeslaMate", async (t) => {
   const result = await runScriptableScript({
     ...readyICloudFixture(),
     queryParameters: {
@@ -873,13 +871,13 @@ test("已配置 Widget 点击进入 App 时直接打开 TeslaMate", async (t) =>
 });
 
 /**
- * 验证旧版 Widget 快照未携带点击 URL 标记时，仍可通过 Widget 参数识别点击来源。
+ * 验证 Scriptable 原生 Widget 点击可通过 Widget 参数识别来源。
  *
- * 使用场景：脚本已由 iCloud 更新，但 iOS 尚未刷新桌面 Widget 的已归档 URL。入参为
- * node:test 上下文；无返回值。测试刻意不传查询参数且不提供 Alert 响应，确保带车辆参数
- * 的旧快照点击不会回退到手动运行菜单。
+ * 使用场景：根 Widget 不设置 URL，点击后由 Scriptable 原生运行脚本并传递车辆参数。
+ * 入参为 node:test 上下文；无返回值。测试刻意不传查询参数且不提供 Alert 响应，确保
+ * 原生点击不会回退到手动运行菜单。
  */
-test("旧 Widget 快照点击已配置脚本时不显示菜单", async (t) => {
+test("原生 Widget 点击已配置脚本时不显示菜单", async (t) => {
   const result = await runScriptableScript({
     ...readyICloudFixture(),
     runsInApp: true,
@@ -2229,7 +2227,7 @@ test("Keychain 迁移候选只在 App 的 iCloud 缺失分支调用", () => {
   const mainEnd = source.indexOf("\nawait main();", mainStart);
   const mainSource = source.slice(mainStart, mainEnd);
   const nonReadyGate = mainSource.indexOf('if (configResult.status !== "ready")');
-  const runtimeContextCreation = mainSource.indexOf("const runtimeContext = createRuntimeContext(carId)");
+  const runtimeContextCreation = mainSource.indexOf("const runtimeContext = createRuntimeContext()");
 
   assert.equal(calls.length, 2);
   assert.match(source, /return runsInApp \? loadLegacyMigrationCandidate\(\) : \{ status: "missing" \}/);
