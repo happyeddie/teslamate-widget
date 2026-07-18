@@ -9,6 +9,7 @@
 - 充电、行驶、在线、离线等状态分支是否可执行。
 - TeslaMateApi 失败时是否能读取车辆缓存。
 - App 内 WebView 分支是否打开 TeslaMate 页面并注入隐藏其他车辆的脚本。
+- 已配置 Widget 的点击 URL 是否携带来源标记，并在进入 App 后跳过管理菜单直接打开 WebView。
 
 ## 运行命令
 

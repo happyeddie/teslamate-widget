@@ -24,7 +24,7 @@
 
 `Telsa Car.js` 是唯一 Scriptable 入口。它按运行上下文分成三条路径：
 
-1. App 内运行：从 Scriptable iCloud documents 读取配置；文件未下载时等待下载，配置缺失、损坏或需迁移时按状态展示受限操作，配置完整时显示“打开 TeslaMate / 管理配置”菜单。
+1. App 内运行：从 Scriptable iCloud documents 读取配置；文件未下载时等待下载，配置缺失、损坏或需迁移时按状态展示受限操作；配置完整时，Widget 点击来源直接打开 TeslaMate，手动运行来源显示“打开 TeslaMate / 管理配置”菜单。
 2. 锁屏 accessory widget：先执行 iCloud 配置门禁；仅 `ready` 时拉取或读取缓存车辆数据并绘制圆形电量图，其他状态只显示静态同步提示。
 3. 桌面 widget：先执行 iCloud 配置门禁；仅 `ready` 时拉取车辆状态、地理编码和地图并构建中号 widget，其他状态只显示静态同步提示。
 
@@ -34,7 +34,8 @@
 - `validateBusinessConfig()`：验证三个业务字段并标准化两个 HTTP(S) 基础 URL。
 - `validateICloudConfigEnvelope()`：验证 `schemaVersion`、规范化 ISO 8601 `updatedAt` 与业务字段。
 - `loadRuntimeConfig()` / `saveRuntimeConfig()`：异步读取和事务性保存 iCloud 配置，并以状态结果执行脱敏降级。
-- `presentAppMenu()` / `presentConfigForm()`：在 App 内展示操作菜单和安全配置表单。
+- `createWidgetOpenUrl()` / `isWidgetOpenAction()`：通过无凭据查询参数区分 Widget 点击与 App 手动运行。
+- `presentAppMenu()` / `presentConfigForm()`：仅在 App 手动运行或配置状态需要交互时展示操作菜单和安全配置表单。
 - `renderUnavailableConfigWidget()`：任意非 `ready` 配置状态下提交无网络、无缓存副作用的 iCloud 同步提示 Widget。
 - `createRuntimeContext()`：配置门禁通过后才创建缓存目录和正常 Widget。
 - `openTeslaMateWebView()`：使用显式运行配置处理 App 内 TeslaMate 页面展示。
@@ -55,10 +56,11 @@ flowchart TD
   C -->|"否，Widget"| E["静态 iCloud 同步提示并结束"]
   D --> F["验证后事务性保存至 iCloud"]
   C -->|"是"| G{"运行上下文"}
-  G -->|"runsInApp"| H["操作菜单：打开 TeslaMate / 管理配置"]
+  G -->|"runsInApp + Widget 点击标记"| H["直接打开 TeslaMate WebView"]
+  G -->|"runsInApp 手动运行"| S["操作菜单：打开 TeslaMate / 管理配置"]
   G -->|"runsInAccessoryWidget"| I["读取 TeslaMateApi 或车辆缓存"]
   G -->|"默认 widget"| J["读取 TeslaMateApi 或车辆缓存"]
-  H --> K["按选择打开 WebView 或配置表单"]
+  S --> K["按选择打开 WebView 或配置表单"]
   J --> L["Location.reverseGeocode 获取地名"]
   J --> M["Amap 静态地图"]
   L --> N["写入 tesla/ 地理缓存"]

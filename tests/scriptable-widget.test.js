@@ -767,6 +767,27 @@ test("锁屏 accessory widget 可以完成圆形电量图渲染", async (t) => {
 });
 
 /**
+ * 验证已配置 Widget 会生成带来源标记的脚本运行 URL。
+ *
+ * 使用场景：iOS 点击 Widget 时必须把下一次 App 运行与手动运行区分开。入参为 node:test
+ * 上下文；无返回值。测试断言点击目标仍为当前脚本，同时携带固定动作参数。
+ */
+test("已配置 Widget 点击 URL 带有直接打开标记", async (t) => {
+  const result = await runScriptableScript({
+    ...readyICloudFixture(),
+    jsonResponse: apiResponse(carStatus("online")),
+    runsInWidget: true,
+    widgetParameter: "2"
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(
+    result.widget.url,
+    "scriptable:///run/Telsa%20Car?teslamateWidgetAction=open&teslamateCarId=2"
+  );
+});
+
+/**
  * 验证已配置 App 菜单的打开动作使用标准化配置进入指定车辆 WebView。
  *
  * 使用场景：用户在 Scriptable 内运行脚本并从操作菜单选择打开 TeslaMate。入参为
@@ -796,6 +817,33 @@ test("App 操作菜单选择打开 TeslaMate 时展示当前车辆 WebView", asy
   assert.equal(result.webViews[0].presented, true);
   assert.equal(result.webViews[0].evaluatedJavaScript.length, 3);
   assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_2"));
+});
+
+/**
+ * 验证从已配置 Widget 点击进入 App 时直接打开 TeslaMate，不插入管理菜单。
+ *
+ * 使用场景：Widget 的点击 URL 通过查询参数标记本次 App 运行来自 Widget。入参为
+ * node:test 上下文；无返回值。测试不提供 Alert 响应，确保生产路径若误弹任何菜单会
+ * 立即失败，同时断言车辆 WebView 仍正常展示。
+ */
+test("已配置 Widget 点击进入 App 时直接打开 TeslaMate", async (t) => {
+  const result = await runScriptableScript({
+    ...readyICloudFixture(),
+    queryParameters: {
+      teslamateWidgetAction: "open",
+      teslamateCarId: "2"
+    },
+    runsInApp: true,
+    widgetParameter: ""
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.alerts.length, 0);
+  assert.equal(result.webViews.length, 1);
+  assert.equal(result.webViews[0].loadedURL, SENTINEL_WEB_URL);
+  assert.equal(result.webViews[0].presented, true);
+  assert.ok(result.webViews[0].evaluatedJavaScript[0].includes("#car_1"));
+  assert.equal(result.script.completed, true);
 });
 
 /**
@@ -2133,7 +2181,7 @@ test("Keychain 迁移候选只在 App 的 iCloud 缺失分支调用", () => {
   const mainEnd = source.indexOf("\nawait main();", mainStart);
   const mainSource = source.slice(mainStart, mainEnd);
   const nonReadyGate = mainSource.indexOf('if (configResult.status !== "ready")');
-  const runtimeContextCreation = mainSource.indexOf("const runtimeContext = createRuntimeContext()");
+  const runtimeContextCreation = mainSource.indexOf("const runtimeContext = createRuntimeContext(carId)");
 
   assert.equal(calls.length, 2);
   assert.match(source, /return runsInApp \? loadLegacyMigrationCandidate\(\) : \{ status: "missing" \}/);

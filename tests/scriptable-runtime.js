@@ -629,7 +629,7 @@ function serialize(value) {
  * widget、缓存及配置流程的业务结果。入参 `options` 可覆盖脚本路径、documents
  * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures`、
  * `iCloudFiles`、`iCloudDownloadedFiles`、`iCloudFailures`、`iCloudReadOverrides`、
- * `iCloudFileEvents`、
+ * `iCloudFileEvents`、`queryParameters`、
  * `failImages` 和 `alertResponses`；`keychainValues` 与 `keychainFailures` 仅为旧配置
  * 一次性迁移、日常路径不触碰 Keychain 的哨兵，以及 runtime API 兼容测试保留。未传入
  * 的可选项使用测试安全的默认值。
@@ -1104,7 +1104,10 @@ async function runScriptableScript(options = {}) {
 
   const sandbox = {
     Alert,
-    args: { widgetParameter: options.widgetParameter || "" },
+    args: {
+      queryParameters: clone(options.queryParameters || {}),
+      widgetParameter: options.widgetParameter || ""
+    },
     config: {
       runsInActionExtension: false,
       runsInApp: Boolean(options.runsInApp),
@@ -1149,6 +1152,10 @@ async function runScriptableScript(options = {}) {
       }
     },
     Size,
+    URLScheme: {
+      // 返回稳定的当前脚本运行 URL，供 Widget 点击来源标记测试精确断言。
+      forRunningScript: () => "scriptable:///run/Telsa%20Car"
+    },
     WebView,
     encodeURI
   };

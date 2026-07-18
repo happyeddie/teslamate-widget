@@ -51,7 +51,7 @@
 
 三项配置会作为一个带版本号的配置文件保存在 Scriptable 的 iCloud Drive documents 中，不会写入脚本。项目不额外设置应用“主密码”：访问控制由 Apple Account 与受信任设备负责；应将所有登录该 Apple Account 的受信任设备视为能够读取此配置。
 
-需要修改现有配置时，在 Scriptable App 内运行脚本，选择“管理配置”，修改后保存。已完成配置时，同一菜单还可选择“打开 TeslaMate”。Widget 刷新过程不会弹出配置表单。
+点击已完成配置的 Widget 会直接打开当前车辆的 TeslaMate 页面，不会经过操作菜单。需要修改现有配置时，请在 Scriptable App 内手动运行脚本，选择“管理配置”，修改后保存；同一菜单也可选择“打开 TeslaMate”。尚未配置、配置需迁移或 iCloud 配置异常时，脚本仍会展示对应的安全配置菜单。Widget 刷新过程不会弹出配置表单。
 
 缓存文件会写入 Scriptable documents 目录下的 `tesla/` 文件夹。
 
