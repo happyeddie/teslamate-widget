@@ -162,7 +162,7 @@ function mapImages(widget) {
 /**
  * 断言敏感 sentinel 不会进入脚本日志、Alert 消息或 Widget 可见文案。
  *
- * 使用场景：网络和 Keychain 故障测试需要同时覆盖三个用户可观测输出面。入参为
+ * 使用场景：网络和配置存储故障测试需要同时覆盖三个用户可观测输出面。入参为
  * runtime 结果和待保护字符串数组；无返回值。只检查 Alert 的标题与消息，不检查
  * 配置表单文本框，因为表单在用户主动管理配置时必须回显已保存值；任一输出包含
  * 完整 sentinel 时由 node:assert 立即报告泄漏来源。
@@ -277,8 +277,8 @@ function createRuntimeICloudDocumentsDirectory(t) {
 /**
  * 断言配置不可用的 Widget 在文件与网络副作用发生前安全结束。
  *
- * 使用场景：复用中号与锁屏 Widget 对空 Keychain、损坏 JSON、schema 不兼容、字段
- * 非法和 Keychain 异常的共同验收规则。入参为 runtime 执行快照；无返回值。提示
+ * 使用场景：复用中号与锁屏 Widget 对正式文件缺失、未下载、内容损坏、schema 不兼容、
+ * 字段非法和 iCloud 异常的共同验收规则。入参为 runtime 执行快照；无返回值。提示
  * 文案、请求数量、完成状态或缓存目录任一不符时，node:assert 会抛出断言错误。
  */
 function assertUnavailableConfigWidget(result) {
@@ -294,7 +294,7 @@ function assertUnavailableConfigWidget(result) {
  * 覆盖所有读取失败与校验失败输入，并在两类 Widget family 上验证统一门禁。
  *
  * 使用场景：任何不可用配置都必须在创建 FileManager 缓存目录和 Request 之前结束。
- * 入参为 node:test 上下文；无返回值。每个场景按自身 Keychain 初始值和故障开关运行
+ * 入参为 node:test 上下文；无返回值。每个场景按自身 iCloud 文件和故障开关运行
  * 中号及 accessoryCircular Widget，执行异常或副作用断言失败均由测试框架报告。
  */
 test("iCloud 配置不可用时 Widget 显示同步提示且不产生副作用", async (t) => {
@@ -378,18 +378,17 @@ test("iCloud 配置不可用时 Widget 显示同步提示且不产生副作用",
     for (const widgetContext of widgetContexts) {
       await t.test(`${invalidConfigCase.name} - ${widgetContext.name}`, async (subtest) => {
         const result = await runScriptableScript({
+          iCloudFailures: invalidConfigCase.iCloudFailures,
+          iCloudFiles: invalidConfigCase.iCloudFiles,
+          iCloudDownloadedFiles: invalidConfigCase.iCloudDownloadedFiles,
           jsonResponse: apiResponse(carStatus("online")),
-          keychainFailures: invalidConfigCase.keychainFailures,
-          keychainValues: invalidConfigCase.keychainValues,
           widgetParameter: "1",
           ...widgetContext
         });
-        subtest.after(() => {
-          // 每次 runtime 使用独立 documents 目录；成功或断言失败后都递归清理。
-          fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-        });
+        cleanupRuntimeDirectories(subtest, result);
 
         assertUnavailableConfigWidget(result);
+        assert.equal(result.iCloudFileObservations.downloadCalls, 0);
       });
     }
   }
@@ -415,18 +414,16 @@ test("iCloud 配置读取可由 App 恢复有效备份且 Widget 只降级", asy
           ...recoveryCase.configFiles,
           [ICLOUD_BACKUP_PATH]: iCloudConfigJson()
         },
-        iCloudDownloadedFiles: [ICLOUD_BACKUP_PATH],
         runsInApp: true
       });
-      subtest.after(() => {
-        fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-        fs.rmSync(result.iCloudDocumentsDirectory, { recursive: true, force: true });
-      });
+      cleanupRuntimeDirectories(subtest, result);
 
       assert.equal(result.alerts[0].title, "TeslaMate Widget");
       assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), true);
       assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH)), false);
       assert.equal(result.requests.length, 0);
+      assert.equal(result.iCloudFileObservations.downloadCalls,
+        recoveryCase.name === "正式无效" ? 2 : 1);
     });
 
     await t.test(`${recoveryCase.name} - Widget`, async (subtest) => {
@@ -438,10 +435,7 @@ test("iCloud 配置读取可由 App 恢复有效备份且 Widget 只降级", asy
         iCloudDownloadedFiles: [ICLOUD_CONFIG_PATH, ICLOUD_BACKUP_PATH],
         runsInWidget: true
       });
-      subtest.after(() => {
-        fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-        fs.rmSync(result.iCloudDocumentsDirectory, { recursive: true, force: true });
-      });
+      cleanupRuntimeDirectories(subtest, result);
 
       assertUnavailableConfigWidget(result);
       assert.equal(result.iCloudFileObservations.downloadCalls, 0);
@@ -464,15 +458,43 @@ test("App iCloud 配置读取下载失败时安全降级", async (t) => {
     keychainFailures: { contains: new Error(`legacy ${SENTINEL_AMAP_API_KEY}`) },
     runsInApp: true
   });
-  t.after(() => {
-    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-    fs.rmSync(result.iCloudDocumentsDirectory, { recursive: true, force: true });
-  });
+  cleanupRuntimeDirectories(t, result);
 
   assert.deepEqual(result.alerts[0].actions, ["重试同步"]);
   assert.equal(result.requests.length, 0);
   assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
   assertSensitiveValuesAbsent(result, [SENTINEL_API_BASE_URL, SENTINEL_AMAP_API_KEY]);
+});
+
+/**
+ * 验证 iCloud `readString()` 返回非字符串时属于存储暂不可用，而不是用户配置内容无效。
+ *
+ * 使用场景：Scriptable/iCloud 桥接层可能在未抛异常时返回 null 或其他非字符串值。入参为
+ * node:test 上下文；无返回值。表驱动要求 App 只提供“重试同步”，不能暴露会覆盖云端
+ * 文件的“修复配置”，同时保持零 Request、零车辆缓存和固定脱敏日志。
+ */
+test("App iCloud readString 返回 null 或非字符串时按 unavailable 降级", async (t) => {
+  for (const readValueCase of [
+    { name: "null", value: null },
+    { name: "数字", value: 7 },
+    { name: "对象", value: { unexpected: true } }
+  ]) {
+    await t.test(readValueCase.name, async (subtest) => {
+      const result = await runScriptableScript({
+        alertResponses: [{ index: -1 }],
+        iCloudFiles: { [ICLOUD_CONFIG_PATH]: iCloudConfigJson() },
+        iCloudReadOverrides: { [ICLOUD_CONFIG_PATH]: [readValueCase.value] },
+        runsInApp: true
+      });
+      cleanupRuntimeDirectories(subtest, result);
+
+      assert.deepEqual(result.alerts[0].actions, ["重试同步"]);
+      assert.equal(result.alerts[0].actions.includes("修复配置"), false);
+      assert.equal(result.logs.includes("运行配置读取暂时不可用"), true);
+      assert.equal(result.requests.length, 0);
+      assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+    });
+  }
 });
 
 test("中号桌面 widget 可以用在线车辆数据完成渲染并写入缓存", async (t) => {
@@ -804,7 +826,7 @@ test("WebView 失败不会泄露完整 URL 或 Key", async (t) => {
 });
 
 /**
- * 验证已配置 App 菜单可以进入预填表单，并允许用户取消而不改动安全存储。
+ * 验证已配置 App 菜单可以进入预填表单，并允许用户取消而不改动 iCloud 正式文件。
  *
  * 使用场景：用户只想查看现有配置但不保存。入参为 node:test 上下文；无返回值。
  * 测试精确断言字段顺序、Key 安全输入属性、已标准化初始值和旧 JSON 不变。
@@ -847,7 +869,7 @@ test("App 操作菜单选择管理配置时预填安全表单且取消不保存"
  * 验证已配置 App 菜单取消后直接结束，不打开页面也不进入配置表单。
  *
  * 使用场景：用户误触运行脚本后关闭操作菜单。入参为 node:test 上下文；无返回值。
- * 测试断言只展示一个 sheet、保留原始 Keychain JSON，并完成 Script 生命周期。
+ * 测试断言只展示一个 sheet、保留原始 iCloud 正式文件，并完成 Script 生命周期。
  */
 test("App 操作菜单取消时不执行任何动作", async (t) => {
   const existingJson = iCloudConfigJson();
@@ -944,6 +966,179 @@ test("App iCloud 配置 invalid 只允许重试读取、修复或取消", async 
       assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
     });
   }
+});
+
+/**
+ * 验证用户明确选择修复后，可以用已完整校验的 pending 替换无效正式或无效备份。
+ *
+ * 使用场景：上次事务遗留的 backup 自身损坏时，普通恢复不能接管，但用户仍必须能通过
+ * “修复配置”解除死锁。入参为 node:test 上下文；无返回值。表驱动覆盖正式缺失和正式
+ * 无效两种初态，成功后只留下规范五字段正式文件，且本次运行不使用候选发起业务请求。
+ */
+test("App 显式修复可替换无效正式文件和无效备份", async (t) => {
+  const invalidFormal = "{invalid-formal";
+  const invalidBackup = "{invalid-backup";
+  const repairCases = [
+    {
+      name: "正式缺失且备份无效",
+      files: { [ICLOUD_BACKUP_PATH]: invalidBackup }
+    },
+    {
+      name: "正式与备份都无效",
+      files: {
+        [ICLOUD_CONFIG_PATH]: invalidFormal,
+        [ICLOUD_BACKUP_PATH]: invalidBackup
+      }
+    }
+  ];
+
+  for (const repairCase of repairCases) {
+    await t.test(repairCase.name, async (subtest) => {
+      const result = await runScriptableScript({
+        alertResponses: [
+          { index: 1 },
+          {
+            index: 0,
+            textFields: [
+              " repaired-amap-key ",
+              "https://repaired-api.example.test///",
+              "https://repaired-web.example.test///"
+            ]
+          },
+          { index: 0 }
+        ],
+        iCloudFiles: repairCase.files,
+        runsInApp: true
+      });
+      cleanupRuntimeDirectories(subtest, result);
+
+      const savedConfig = readICloudConfig(result);
+      assert.deepEqual(Object.keys(savedConfig).sort(), [
+        "amapApiKey",
+        "schemaVersion",
+        "teslaMateApiBaseUrl",
+        "teslaMateWebUrl",
+        "updatedAt"
+      ]);
+      assert.equal(savedConfig.amapApiKey, "repaired-amap-key");
+      assert.equal(savedConfig.teslaMateApiBaseUrl, "https://repaired-api.example.test");
+      assert.equal(savedConfig.teslaMateWebUrl, "https://repaired-web.example.test");
+      assert.equal(new Date(savedConfig.updatedAt).toISOString(), savedConfig.updatedAt);
+      assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+      assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH)), false);
+      assert.equal(result.alerts.at(-1).title, "保存成功");
+      assert.equal(result.requests.length, 0);
+      assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+    });
+  }
+});
+
+/**
+ * 验证显式修复只有在 pending 完整校验后才允许删除无效旧工件。
+ *
+ * 使用场景：修复候选写入后可能因损坏或同步窗口无法通过复读。入参为 node:test 上下文；
+ * 无返回值。两种无效初态都必须逐字保留原工件、清理 pending，并以固定失败提示结束；
+ * 候选和无效备份均不得进入业务链或初始化本地车辆缓存。
+ */
+test("App 显式修复的 pending 校验失败时保留无效旧工件", async (t) => {
+  const invalidFormal = "{invalid-formal-preserved";
+  const invalidBackup = "{invalid-backup-preserved";
+  const repairCases = [
+    {
+      name: "正式缺失且备份无效",
+      files: { [ICLOUD_BACKUP_PATH]: invalidBackup }
+    },
+    {
+      name: "正式与备份都无效",
+      files: {
+        [ICLOUD_CONFIG_PATH]: invalidFormal,
+        [ICLOUD_BACKUP_PATH]: invalidBackup
+      }
+    }
+  ];
+
+  for (const repairCase of repairCases) {
+    await t.test(repairCase.name, async (subtest) => {
+      const result = await runScriptableScript({
+        alertResponses: [
+          { index: 1 },
+          {
+            index: 0,
+            textFields: [
+              "failed-repair-key",
+              "https://failed-repair-api.example.test",
+              "https://failed-repair-web.example.test"
+            ]
+          },
+          { index: 0 }
+        ],
+        iCloudFiles: repairCase.files,
+        iCloudReadOverrides: { [ICLOUD_PENDING_PATH]: ["{"] },
+        runsInApp: true
+      });
+      cleanupRuntimeDirectories(subtest, result);
+
+      const formalPath = path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH);
+      const backupPath = path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH);
+      assert.equal(result.alerts.at(-1).title, "保存失败");
+      assert.equal(fs.existsSync(formalPath), Boolean(repairCase.files[ICLOUD_CONFIG_PATH]));
+      if (repairCase.files[ICLOUD_CONFIG_PATH]) {
+        assert.equal(fs.readFileSync(formalPath, "utf8"), invalidFormal);
+      }
+      assert.equal(fs.readFileSync(backupPath, "utf8"), invalidBackup);
+      assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+      assert.equal(result.requests.length, 0);
+      assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+      assertSensitiveValuesAbsent(result, [
+        "failed-repair-key",
+        "https://failed-repair-api.example.test",
+        "https://failed-repair-web.example.test"
+      ]);
+    });
+  }
+});
+
+/**
+ * 验证显式修复在清理无效工件后安装候选失败时，不会回退使用无效 backup。
+ *
+ * 使用场景：pending 已完整校验且旧工件已确认无效，但最终移动仍可能失败。入参为
+ * node:test 上下文；无返回值。失败后正式、backup、pending 都不得成为本次业务配置，
+ * 脚本只显示固定失败提示并保持零 Request、零车辆缓存。
+ */
+test("App 显式修复安装候选失败时不恢复无效备份", async (t) => {
+  const result = await runScriptableScript({
+    alertResponses: [
+      { index: 1 },
+      {
+        index: 0,
+        textFields: [
+          "move-failed-repair-key",
+          "https://move-failed-api.example.test",
+          "https://move-failed-web.example.test"
+        ]
+      },
+      { index: 0 }
+    ],
+    iCloudFailures: { moveAtCall: 1 },
+    iCloudFiles: {
+      [ICLOUD_CONFIG_PATH]: "{invalid-formal-before-move",
+      [ICLOUD_BACKUP_PATH]: "{invalid-backup-before-move"
+    },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.alerts.at(-1).title, "保存失败");
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), false);
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH)), false);
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+  assertSensitiveValuesAbsent(result, [
+    "move-failed-repair-key",
+    "https://move-failed-api.example.test",
+    "https://move-failed-web.example.test"
+  ]);
 });
 
 /**
@@ -1273,7 +1468,7 @@ test("App 配置表单取消时不写入 iCloud", async (t) => {
  * 验证 iCloud pending 写入异常显示脱敏失败提示，且原有正式配置保持逐字不变。
  *
  * 使用场景：用户管理配置时 iCloud 文件暂时不可写。入参为 node:test 上下文；无
- * 返回值。测试给出新的敏感输入但注入 set 异常，随后比较旧值并检查提示与日志均
+ * 返回值。测试给出新的敏感输入但注入 iCloud 写入异常，随后比较旧值并检查提示与日志均
  * 不包含新旧 Key 或私有 URL。
  */
 test("App 配置表单 iCloud 写入失败时显示通用错误且不改变旧值", async (t) => {
@@ -1657,32 +1852,30 @@ test("FileManager 拒绝 documents 根外的 .. 路径", async (t) => {
 });
 
 /**
- * 验证 iCloud FileManager 能按相对路径依次消费读取覆盖值，并禁止将正文写入结果快照。
+ * 验证 iCloud FileManager 能按相对路径依次消费任意读取覆盖值，并禁止将正文写入快照。
  *
  * 使用场景：配置保存事务需要稳定模拟“首次校验成功、正式安装后复读损坏”的竞态。入参
- * 为 node:test 上下文；测试预置原始文件和两次覆盖正文，临时脚本必须依序读取两个覆盖
- * 值。返回观测只能包含相对路径、文件存在性、长度和次数，任一正文进入快照即失败。
+ * 为 node:test 上下文；测试预置原始文件、两次覆盖正文和 null，临时脚本必须依序原样
+ * 读取三个覆盖值。返回观测只能包含相对路径、文件存在性、长度和次数，正文进入快照即失败。
  */
 test("iCloud readString 支持按读取次数消费脱敏覆盖值", async (t) => {
   const result = await runScriptableScript({
     iCloudFiles: { "teslamate/config.v1.json": "sentinel-stored-body" },
     iCloudReadOverrides: {
-      "teslamate/config.v1.json": ["sentinel-first-read", "sentinel-second-read"]
+      "teslamate/config.v1.json": ["sentinel-first-read", "sentinel-second-read", null]
     },
     scriptPath: writeRuntimeTestScript(t, `
       const cloud = FileManager.iCloud();
       const target = cloud.joinPath(cloud.documentsDirectory(), "teslamate/config.v1.json");
       if (cloud.readString(target) !== "sentinel-first-read") throw new Error("first override mismatch");
       if (cloud.readString(target) !== "sentinel-second-read") throw new Error("second override mismatch");
+      if (cloud.readString(target) !== null) throw new Error("null override mismatch");
       Script.complete();
     `)
   });
-  t.after(() => {
-    fs.rmSync(result.documentsDirectory, { recursive: true, force: true });
-    fs.rmSync(result.iCloudDocumentsDirectory, { recursive: true, force: true });
-  });
+  cleanupRuntimeDirectories(t, result);
 
-  assert.equal(result.iCloudFileObservations.readCalls, 2);
+  assert.equal(result.iCloudFileObservations.readCalls, 3);
   assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-first-read"), false);
   assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-second-read"), false);
 });

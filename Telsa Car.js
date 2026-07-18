@@ -44,7 +44,8 @@ function isValidHttpPort(value) {
 /**
  * 标准化并验证 HTTP(S) 基础 URL。
  *
- * 使用场景：Keychain 读取和配置保存都必须得到可安全拼接路径的基础地址。入参可为
+ * 使用场景：iCloud 正式配置、旧 Keychain 迁移候选和表单保存都必须得到可安全拼接
+ * 路径的基础地址。入参可为
  * 任意值；成功返回 `{ ok: true, value }`，其中 value 已去除全部末尾斜杠；
  * 失败返回不含原始输入的 `{ ok: false, message }`。authority 只接受非空 host 和
  * 可选的 1..65535 纯数字端口；本方法不依赖 JavaScriptCore 可能未提供的 URL 全局
@@ -246,6 +247,13 @@ function readAndValidateICloudConfig(fm, filePath) {
     return { status: "unavailable" };
   }
 
+  // Scriptable/iCloud 桥接层未抛异常但返回非字符串，同样表示读取边界不可用；不能把
+  // null 等值交给 JSON.parse 隐式转换，否则会误导用户进入可覆盖云端文件的修复流程。
+  if (typeof serializedConfig !== "string") {
+    console.log("运行配置读取暂时不可用");
+    return { status: "unavailable" };
+  }
+
   try {
     const parsed = JSON.parse(serializedConfig);
     const validationResult = validateICloudConfigEnvelope(parsed);
@@ -419,12 +427,12 @@ function tryRemoveConfigArtifact(fm, filePath) {
 /**
  * 在写入新 pending 前收敛上次中断留下的事务工件。
  *
- * 使用场景：`saveRuntimeConfig()` 每次保存的第一步。入参为同一 iCloud 存储集合；返回
- * Promise<void>。方法创建固定目录、清理旧 pending；正式与 backup 同在时先验证正式，
- * 只有 ready 才删除过期 backup，否则复用完整备份恢复。正式缺失但 backup 存在时也先
- * 恢复；任何非 ready 恢复结果抛内部固定 Error，由保存外层转换为统一失败。
+ * 使用场景：`saveRuntimeConfig()` 每次保存的第一步。入参为同一 iCloud 存储集合与是否
+ * 进入用户明确授权的无效工件替换模式；返回 Promise<void>。方法创建固定目录、严格清理
+ * 旧 pending。普通模式继续收敛或恢复既有事务工件；显式修复模式延后处理正式和 backup，
+ * 保证候选 pending 完整校验前不删除任何无效旧工件。
  */
-async function prepareICloudSave(storage) {
+async function prepareICloudSave(storage, replaceInvalidArtifacts) {
   // 配置目录只在 App 明确保存时创建，Widget 读取路径永不创建目录。
   if (!storage.fm.isDirectory(storage.directoryPath)) {
     storage.fm.createDirectory(storage.directoryPath);
@@ -432,6 +440,11 @@ async function prepareICloudSave(storage) {
   // 遗留 pending 必须在新写入前严格删除；清理失败时停止事务，不能依赖覆盖语义。
   if (storage.fm.fileExists(storage.pendingPath)) {
     storage.fm.remove(storage.pendingPath);
+  }
+
+  // 显式修复必须先写入并复读 pending；现有工件的验证与删除由后置边界统一完成。
+  if (replaceInvalidArtifacts) {
+    return;
   }
 
   const configExists = storage.fm.fileExists(storage.configPath);
@@ -465,15 +478,60 @@ async function prepareICloudSave(storage) {
 }
 
 /**
+ * 在 pending 已完整校验后验证并删除用户明确授权替换的无效工件。
+ *
+ * 使用场景：App 的“修复配置”入口允许解除无效 backup 导致的普通事务死锁。入参为同一
+ * iCloud 存储集合；返回 Promise<void>。方法先下载并完整读取所有仍存在的正式和 backup，
+ * 只有它们全部明确为 `invalid` 且至少存在一个工件时才开始删除；`ready`、`unavailable`
+ * 或文件已全部消失都抛固定内部错误。删除失败可留下部分无效工件，但调用方不得安装候选、
+ * 不得恢复或使用旧 backup，pending 由保存事务 finally 清理。
+ */
+async function removeInvalidConfigArtifactsForRepair(storage) {
+  const configExists = storage.fm.fileExists(storage.configPath);
+  const backupExists = storage.fm.fileExists(storage.backupPath);
+  // 从 invalid 菜单进入后若工件已被系统全部移除，状态已经变化，应停止而不是猜测创建。
+  if (!configExists && !backupExists) {
+    throw new Error("repair-artifacts-missing");
+  }
+
+  if (configExists) {
+    await storage.fm.downloadFileFromiCloud(storage.configPath);
+    const configResult = readAndValidateICloudConfig(storage.fm, storage.configPath);
+    // 只允许替换内容明确无效的正式文件；有效或暂不可读都必须逐字保留。
+    if (configResult.status !== "invalid") {
+      throw new Error("repair-config-not-invalid");
+    }
+  }
+  if (backupExists) {
+    await storage.fm.downloadFileFromiCloud(storage.backupPath);
+    const backupResult = readAndValidateICloudConfig(storage.fm, storage.backupPath);
+    // 无效 backup 不能作为恢复源，但也只有明确 invalid 时才属于用户本次替换授权。
+    if (backupResult.status !== "invalid") {
+      throw new Error("repair-backup-not-invalid");
+    }
+  }
+
+  // 所有仍存在工件均完成校验后才开始删除，确保 pending 校验失败时旧内容完全不变。
+  if (configExists) {
+    storage.fm.remove(storage.configPath);
+  }
+  if (backupExists) {
+    storage.fm.remove(storage.backupPath);
+  }
+}
+
+/**
  * 通过 pending/backup 双标志事务保存 iCloud 运行配置。
  *
- * 使用场景：App 表单或旧 Keychain 迁移经用户确认后调用。入参为任意业务配置；成功返回
- * `{ ok: true, value }`，value 是完成两次写后读校验的五字段 envelope；校验或任何 iCloud
- * 步骤失败返回固定脱敏结果。`backupCreatedByTransaction` 仅在正式成功移到 backup 后置位，
+ * 使用场景：App 表单或旧 Keychain 迁移经用户确认后调用。入参为任意业务配置和是否允许
+ * 替换已确认无效工件的显式修复标记；省略时为 false，只有 invalid 菜单的“修复配置”传
+ * true。成功返回 `{ ok: true, value }`，value 是完成两次写后读校验的五字段 envelope；
+ * 校验或任何 iCloud 步骤失败返回固定脱敏结果。`backupCreatedByTransaction` 仅在正式成功
+ * 移到 backup 后置位，
  * `candidateInstalled` 仅在 pending 成功安装后置位，失败清理严格依据本次事务状态，绝不
  * 误删未安装候选前的正式文件。方法不使用 Node API，不访问 Keychain。
  */
-async function saveRuntimeConfig(input) {
+async function saveRuntimeConfig(input, replaceInvalidArtifacts = false) {
   const businessResult = validateBusinessConfig(input);
   // 业务校验失败时不创建目录、不写任何工件，保留现有配置逐字不变。
   if (!businessResult.ok) {
@@ -497,12 +555,17 @@ async function saveRuntimeConfig(input) {
   let backupCreatedByTransaction = false;
   let candidateInstalled = false;
   try {
-    await prepareICloudSave(storage);
+    await prepareICloudSave(storage, replaceInvalidArtifacts);
     storage.fm.writeString(storage.pendingPath, JSON.stringify(candidate));
     const pendingResult = readAndValidateICloudConfig(storage.fm, storage.pendingPath);
     // pending 必须内容有效且逐字段等于内存候选，任何差异都停止在安装之前。
     if (pendingResult.status !== "ready" || !configsEqual(pendingResult.value, candidate)) {
       throw new Error("pending-validation-failed");
+    }
+
+    // 只有用户明确修复且 pending 已逐字段匹配时，才验证并移除现有无效工件。
+    if (replaceInvalidArtifacts) {
+      await removeInvalidConfigArtifactsForRepair(storage);
     }
 
     // 只有正式确实存在时才创建本次 backup；move 成功后立即置位供 catch 精确恢复。
@@ -548,7 +611,7 @@ async function saveRuntimeConfig(input) {
 /**
  * 使用独立原生 Alert 展示不含敏感配置值的状态消息。
  *
- * 使用场景：配置校验失败、Keychain 写入失败或保存成功后，需要等待用户明确确认再
+ * 使用场景：配置校验失败、iCloud 保存失败或保存成功后，需要等待用户明确确认再
  * 继续或结束流程。入参 `title` 和 `message` 只能由调用方传入固定业务文案；无业务
  * 返回值，Alert 展示异常原样抛出。该方法不接收配置对象，避免误把 Key 或私有 URL
  * 拼接进提示内容。
@@ -564,13 +627,14 @@ async function presentMessage(title, message) {
 /**
  * 循环展示单脚本运行配置表单，并在用户确认后校验和保存完整 schema v1 配置。
  *
- * 使用场景：首次运行缺少配置时直接调用，或从 App 操作菜单进入管理配置时调用。
- * 入参 `initialConfig` 为已验证配置或 null；成功保存返回标准化配置，取消、保存失败
- * 返回 null。文本框固定按高德 Key、TeslaMateApi URL、TeslaMate Web URL 排列，Key
+ * 使用场景：用户从创建、管理或显式修复入口进入配置表单时调用。入参 `initialConfig`
+ * 为已验证配置或 null；`replaceInvalidArtifacts` 只允许 invalid 菜单明确修复时为 true；
+ * 成功保存返回标准化配置，取消、保存失败返回 null。文本框固定按高德 Key、TeslaMateApi
+ * URL、TeslaMate Web URL 排列，Key
  * 使用安全文本框；校验失败会保留本次原始输入重试，所有状态提示均使用固定脱敏
- * 文案。Alert 或 Keychain 之外的意外异常原样抛出。
+ * 文案。Alert 或 iCloud 事务之外的意外异常原样抛出。
  */
-async function presentConfigForm(initialConfig) {
+async function presentConfigForm(initialConfig, replaceInvalidArtifacts = false) {
   let formValues;
   // 已配置入口预填当前标准化值，首次配置入口使用空值；分支只处理可信配置或 null。
   if (initialConfig) {
@@ -619,7 +683,7 @@ async function presentConfigForm(initialConfig) {
       continue;
     }
 
-    const saveResult = await saveRuntimeConfig(validationResult.value);
+    const saveResult = await saveRuntimeConfig(validationResult.value, replaceInvalidArtifacts);
     // 候选已通过校验，此处失败只代表 iCloud 事务失败；旧值由双标志算法尽力恢复。
     if (!saveResult.ok) {
       await presentMessage("保存失败", "无法保存配置，请稍后重试");
@@ -836,7 +900,7 @@ async function presentNonReadyConfigInApp(initialResult) {
     if (currentResult.status === "invalid") {
       const invalidAction = await presentInvalidConfigMenu();
       if (invalidAction === "repair") {
-        await presentConfigForm(null);
+        await presentConfigForm(null, true);
         return;
       }
       if (invalidAction !== "retry") {

@@ -415,8 +415,9 @@ class TestFileManager {
    * 读取文本文件，必要时按相对路径和读取次数返回测试覆盖值。
    *
    * 使用场景：测试需要稳定构造 pending 校验成功、正式文件复读失败的事务窗口。入参为
-   * 文件绝对路径；先记录并处理 `readString` 故障，再消费该相对路径覆盖数组的队首字符串。
-   * 覆盖数组耗尽或未配置时读取实际隔离文件；正文仅返回给 VM，观测中只记录最终文件长度。
+   * 文件绝对路径；先记录并处理 `readString` 故障，再原样消费该相对路径覆盖数组的队首值，
+   * 包括用于模拟 Scriptable 桥接异常的 null 或其他非字符串。覆盖数组耗尽或未配置时读取
+   * 实际隔离文件；正文仅返回给 VM，观测中只记录最终文件长度。
    */
   readString(filePath) {
     const safePath = this.assertPathInDocuments(filePath);
@@ -597,7 +598,8 @@ function serialize(value) {
  * 值或 Error：true 使用向后兼容的固定 Mock Error，Error 实例则原样抛出，供安全测试
  * 携带虚构敏感信息。成功时返回 documents 路径、请求/日志/Widget/WebView 快照、Keychain
  * 写入的脱敏观测、生命周期、iCloud 文件元数据以及最终 Keychain 和 Alert 观测；返回值
- * 均不持有内部可变集合。iCloud 文件结果只包含路径、存在性和长度，绝不包含正文。
+ * `iCloudReadOverrides` 的队列值会原样返回，可包含 null 或其他非字符串以模拟桥接异常。
+ * 所有结果均不持有内部可变集合。iCloud 文件结果只包含路径、存在性和长度，绝不包含正文。
  * VM 异常会原样向调用方抛出，同时附加不含异常详情的 `runtimeResult` 快照，便于安全测试
  * 断言错误期间的日志、Alert 与 Widget 输出；交互响应不足仍使用固定错误供测试精确断言。
  */
