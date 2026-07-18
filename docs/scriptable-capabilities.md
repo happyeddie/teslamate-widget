@@ -26,11 +26,11 @@
 - iOS widget 存在内存限制；官方 `ListWidget` 文档明确提示使用过多内存会导致 widget 崩溃或无法正确渲染。
 - `ListWidget.refreshAfterDate` 表示最早可刷新时间，不保证 iOS 会在该时间点刷新。
 - 锁屏 accessory widget 从 iOS 16 开始可用，`config.widgetFamily` 可能是 `accessoryCircular`、`accessoryInline`、`accessoryRectangular` 等。
-- `FileManager.iCloud()` 返回 Scriptable iCloud documents 文件管理器；iCloud 文件可能仅有元数据而未下载，访问内容前需按运行上下文处理下载状态。
-- `downloadFileFromiCloud(path)` 用于 App 等待指定 iCloud 文件下载完成；Widget 不得调用，避免长时间等待占用执行预算。
-- `isFileDownloaded(path)` 用于 Widget 判断指定 iCloud 文件是否已有本地内容；未下载时必须安全降级为 `unavailable`。
-- `move(source, destination)` 与 `remove(path)` 仅用于同一 iCloud 配置目录内的 pending/backup 保存事务与恢复；移动和最终校验失败时只能恢复本次事务创建的 backup，并尽力清理 pending。
-- `Keychain.set()` 只接受字符串值，并将其存入加密数据库；本项目仅在 App 一次性迁移旧配置 `teslamate-widget.config.v1` 时使用 `contains()`、`get()` 和迁移成功后的 `remove()`，Widget 永不访问 Keychain。
+- 目标 iCloud 配置架构将使用 `FileManager.iCloud()` 获取 Scriptable iCloud documents 文件管理器；iCloud 文件可能仅有元数据而未下载，后续实现访问内容前需按运行上下文处理下载状态。
+- 目标 iCloud 配置架构将由 App 使用 `downloadFileFromiCloud(path)` 等待指定文件下载完成；后续 Widget 实现不得调用，避免长时间等待占用执行预算。
+- 目标 iCloud 配置架构将由 Widget 使用 `isFileDownloaded(path)` 判断正式配置是否已有本地内容；后续实现未下载时必须安全降级为 `unavailable`。
+- 目标 iCloud 配置架构将使用 `move(source, destination)` 与 `remove(path)` 完成同一配置目录内的 pending/backup 保存事务与恢复；后续实现中移动和最终校验失败时只能恢复本次事务创建的 backup，并尽力清理 pending。
+- 当前代码的 `Keychain.set()` 只接受字符串值，并将其存入加密数据库。目标 iCloud 配置架构实施后，Keychain 仅用于 App 一次性迁移旧配置 `teslamate-widget.config.v1` 的 `contains()`、`get()` 与迁移成功后的 `remove()`，Widget 永不访问 Keychain。
 - `Alert` 文本框只能用于 alert 展示，不能用于 action sheet；取消动作统一返回 `-1`。Widget 刷新不应展示交互式 Alert，配置表单只在 `config.runsInApp` 路径使用。
 
 ## 官方 API 能力总览
@@ -45,18 +45,18 @@
 - iOS 系统服务：`Calendar`、`CalendarEvent`、`Reminder`、`Contact`、`ContactsContainer`、`ContactsGroup`、`Location`、`Notification`、`Photos`、`Safari`、`Speech`、`Dictation`、`Device`、`Timer`。
 - 集成入口：`CallbackURL`、`URLScheme`、Siri Shortcuts、Share Sheet Extension、x-callback-url。
 
-## 本项目实际使用的 API
+## 当前实现与目标 iCloud 架构 API
 
-| 能力 | 当前用途 | 代码位置 |
+| 能力 | 当前用途或目标设计约定 | 当前代码位置或后续实现位置 |
 | --- | --- | --- |
 | `args.widgetParameter` | 解析车 ID 和主题参数 | `Telsa Car.js:4` |
 | `config.runsInApp` | `main()` 中：配置缺失时进入表单；已配置时显示菜单，按用户选择管理配置或打开 TeslaMate WebView | `main()` 的 App 配置门禁与 App 菜单分支 |
 | `config.runsInAccessoryWidget` | `main()` 中：通过配置门禁后进入锁屏 accessory widget 渲染分支 | `main()` 的 accessory 分支 |
-| `FileManager.iCloud()` | 构造 `teslamate/config.v1.json` 及同目录 pending/backup 配置工件路径 | `loadRuntimeConfig()` / `saveRuntimeConfig()` |
-| `FileManager.isFileDownloaded()` | Widget 判断正式 iCloud 配置是否可本地读取；未下载即返回 `unavailable` | `loadRuntimeConfig()` 的 Widget 配置门禁 |
-| `FileManager.downloadFileFromiCloud()` | App 下载正式或待恢复备份配置后再读取验证 | `loadRuntimeConfig()` 的 App 配置门禁与恢复分支 |
-| `FileManager.move()` / `remove()` | App 保存时完成 pending、正式与 backup 的事务替换、恢复和清理 | `saveRuntimeConfig()` |
-| `Keychain.contains()` / `get()` / `remove()` | 仅 App 在 iCloud 正式与备份文件均不存在时读取一次性旧配置；迁移写后读校验成功后删除 | `loadRuntimeConfig()` / `migrateLegacyConfig()` |
+| `FileManager.iCloud()` | 目标架构：构造 `teslamate/config.v1.json` 及同目录 pending/backup 配置工件路径 | 后续 `loadRuntimeConfig()` / `saveRuntimeConfig()` 实现位置 |
+| `FileManager.isFileDownloaded()` | 目标架构：Widget 判断正式 iCloud 配置是否可本地读取；未下载即返回 `unavailable` | 后续 `loadRuntimeConfig()` 的 Widget 配置门禁 |
+| `FileManager.downloadFileFromiCloud()` | 目标架构：App 下载正式或待恢复备份配置后再读取验证 | 后续 `loadRuntimeConfig()` 的 App 配置门禁与恢复分支 |
+| `FileManager.move()` / `remove()` | 目标架构：App 保存时完成 pending、正式与 backup 的事务替换、恢复和清理 | 后续 `saveRuntimeConfig()` 实现位置 |
+| `Keychain.contains()` / `get()` / `remove()` | 当前代码读取日常配置；目标架构实施后仅 App 在 iCloud 正式与备份文件均不存在时读取一次性旧配置，迁移校验成功后删除 | 当前 `Telsa Car.js:185`, `Telsa Car.js:220`；后续 `loadRuntimeConfig()` / `migrateLegacyConfig()` |
 | `Alert` | App 内操作菜单、安全配置表单和状态提示 | `Telsa Car.js:238`, `Telsa Car.js:274`, `Telsa Car.js:398` |
 | `FileManager.local()` | 配置门禁通过后缓存车辆数据、地图和地理编码 | `Telsa Car.js:323` |
 | `Request.loadJSON()` | 拉取 TeslaMateApi 车辆状态 | `Telsa Car.js:539` |
