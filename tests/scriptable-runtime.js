@@ -251,12 +251,12 @@ class TestFileManager {
    */
   fileExists(filePath) {
     const safePath = this.assertPathInDocuments(filePath);
-    this.operationHooks?.before("fileExists");
+    this.operationHooks?.before("fileExists", safePath);
     this.recordFileOperation("fileExists", safePath);
     this.throwFileFailure("fileExists");
     const exists = fs.existsSync(safePath);
     // 同步事件必须在本次存在性结果确定后才落盘，使调用方本次看到旧状态、下次看到新状态。
-    this.operationHooks?.after("fileExists");
+    this.operationHooks?.after("fileExists", safePath);
     return exists;
   }
 
@@ -298,6 +298,28 @@ class TestFileManager {
     this.recordFileOperation("download", safePath);
     this.throwFileFailure("download");
     this.downloadedFiles.add(safePath);
+  }
+
+  /**
+   * 按 Scriptable 契约把源文件非覆盖复制到目标路径。
+   *
+   * 使用场景：legacy 配置安装需要在 gate 后以文件系统原语拒绝覆盖刚同步出现的正式文件。
+   * 入参为源、目标绝对路径；两者先通过当前 FileManager 根目录门禁，再记录目标路径与调用
+   * 次数并处理故障注入。目标已存在时 `COPYFILE_EXCL` 抛错且双方正文不变；成功时源文件
+   * 保留，并把源的已下载状态复制到目标。无正常返回值，正文不进入观测。
+   */
+  copy(sourcePath, destinationPath) {
+    // 两个路径必须在事件、观测与文件系统调用前全部通过归属校验，防止半执行跨根复制。
+    const safeSourcePath = this.assertPathInDocuments(sourcePath);
+    const safeDestinationPath = this.assertPathInDocuments(destinationPath);
+    this.operationHooks?.before("copy", safeDestinationPath);
+    this.recordFileOperation("copy", safeDestinationPath);
+    this.throwFileFailure("copy");
+    fs.copyFileSync(safeSourcePath, safeDestinationPath, fs.constants.COPYFILE_EXCL);
+    if (this.downloadedFiles.has(safeSourcePath)) {
+      this.downloadedFiles.add(safeDestinationPath);
+    }
+    this.operationHooks?.after("copy", safeDestinationPath);
   }
 
   /**
@@ -375,6 +397,7 @@ class TestFileManager {
     const counterName = {
       download: "downloadCalls",
       downloadState: "downloadStateCalls",
+      copy: "copyCalls",
       fileExists: "fileExistsCalls",
       move: "moveCalls",
       readString: "readCalls",
@@ -428,7 +451,7 @@ class TestFileManager {
    */
   readString(filePath) {
     const safePath = this.assertPathInDocuments(filePath);
-    this.operationHooks?.before("readString");
+    this.operationHooks?.before("readString", safePath);
     this.recordFileOperation("readString", safePath);
     this.throwFileFailure("readString");
     const relativePath = path.relative(this.documents, safePath);
@@ -436,11 +459,11 @@ class TestFileManager {
     if (Array.isArray(overrides) && overrides.length > 0) {
       const overriddenValue = overrides.shift();
       // 延迟事件从 readString 完成后开始等待，确保随后生产校验已拿到本次固定返回值。
-      this.operationHooks?.after("readString");
+      this.operationHooks?.after("readString", safePath);
       return overriddenValue;
     }
     const content = fs.readFileSync(safePath, "utf8");
-    this.operationHooks?.after("readString");
+    this.operationHooks?.after("readString", safePath);
     return content;
   }
 
@@ -628,6 +651,7 @@ async function runScriptableScript(options = {}) {
   const iCloudDocumentsDirectory = options.iCloudDocumentsDirectory ||
     fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-icloud-docs-"));
   const iCloudFileObservations = {
+    copyCalls: 0,
     downloadCalls: 0,
     downloadStateCalls: 0,
     moveCalls: 0,
@@ -685,9 +709,9 @@ async function runScriptableScript(options = {}) {
    * 复制并验证运行中 iCloud 文件事件的最小调度字段。
    *
    * 使用场景：竞态测试按 `afterOperation` 的第 `atCall` 次完成点触发；可选
-   * `beforeOperation` 让文件延迟到后续目标操作开始前才出现。入参来自测试 options；
-   * 返回独立事件数组，避免 runtime 消费状态反向修改调用方对象。无效事件直接抛错，防止
-   * 拼写错误让安全测试静默退化为“从未注入”。
+   * `relativePath` 把次数限定到单个 iCloud 路径，可选 `beforeOperation` 让文件延迟到后续
+   * 目标操作开始前才出现。入参来自测试 options；返回独立事件数组，避免 runtime 消费
+   * 状态反向修改调用方对象。无效事件直接抛错，防止拼写错误让安全测试静默退化。
    */
   const iCloudFileEvents = (options.iCloudFileEvents || []).map((event) => {
     if (!event || typeof event.afterOperation !== "string" ||
@@ -695,11 +719,21 @@ async function runScriptableScript(options = {}) {
       !event.files || typeof event.files !== "object") {
       throw new Error("Invalid iCloudFileEvents entry");
     }
+    const relativePath = typeof event.relativePath === "string"
+      ? path.normalize(event.relativePath)
+      : null;
+    // 路径限定只能指向 iCloud 临时根内的相对文件，不能借事件调度绕过夹具路径门禁。
+    if (relativePath && (path.isAbsolute(relativePath) || relativePath === ".." ||
+      relativePath.startsWith(`..${path.sep}`))) {
+      throw new Error("Invalid iCloudFileEvents relativePath");
+    }
     return {
       afterOperation: event.afterOperation,
       atCall: event.atCall,
       beforeOperation: typeof event.beforeOperation === "string" ? event.beforeOperation : null,
       files: { ...event.files },
+      matchedCalls: 0,
+      relativePath,
       triggered: false
     };
   });
@@ -726,14 +760,27 @@ async function runScriptableScript(options = {}) {
    * 记录目标操作完成次数，并触发对应的即时或延迟 iCloud 文件事件。
    *
    * 使用场景：Alert 确认完成、FileManager 读取或存在性检查返回前都调用本边界。入参为
-   * 固定操作名；无返回值。同一事件只触发一次；带 `beforeOperation` 的事件进入等待队列，
-   * 其余事件立即写入，从而让当前操作结果保持事件发生前的状态。
+   * 固定操作名和可选绝对路径；无返回值。同一事件只触发一次；带路径限定的事件独立统计
+   * 该路径匹配次数，带 `beforeOperation` 的事件进入等待队列，其余事件立即写入，从而让
+   * 当前操作结果保持事件发生前的状态。
    */
-  function afterRuntimeOperation(operation) {
+  function afterRuntimeOperation(operation, filePath = null) {
     iCloudOperationCalls[operation] = (iCloudOperationCalls[operation] || 0) + 1;
     for (const event of iCloudFileEvents) {
-      if (event.triggered || event.afterOperation !== operation ||
-        event.atCall !== iCloudOperationCalls[operation]) {
+      if (event.triggered || event.afterOperation !== operation) {
+        continue;
+      }
+      let matchedCall = iCloudOperationCalls[operation];
+      if (event.relativePath) {
+        // 路径事件只统计目标相对路径；其他同类操作不会提前消费其 atCall。
+        if (typeof filePath !== "string" ||
+          path.relative(iCloudDocumentsDirectory, filePath) !== event.relativePath) {
+          continue;
+        }
+        event.matchedCalls += 1;
+        matchedCall = event.matchedCalls;
+      }
+      if (event.atCall !== matchedCall) {
         continue;
       }
       event.triggered = true;

@@ -1238,6 +1238,8 @@ test("App 可显式修复 schema 字段或 JSON 无效的旧 Keychain", async (t
       assert.equal(savedConfig.teslaMateApiBaseUrl, "https://repaired-legacy-api.example.test");
       assert.equal(savedConfig.teslaMateWebUrl, "https://repaired-legacy-web.example.test");
       assert.equal(Object.hasOwn(result.keychain, RUNTIME_CONFIG_KEY), false);
+      assert.equal(result.iCloudFileObservations.copyCalls, 1);
+      assert.equal(result.iCloudFileObservations.moveCalls, 0);
       assert.equal(result.iCloudFileObservations.downloadCalls, 1);
       assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH)), false);
       assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
@@ -1250,9 +1252,9 @@ test("App 可显式修复 schema 字段或 JSON 无效的旧 Keychain", async (t
 /**
  * 验证 legacy invalid 修复安装候选失败时保留旧键，且候选不进入业务链。
  *
- * 使用场景：pending 已校验且 iCloud 正式/backup 仍缺失，但 pending 移动为正式文件失败。
- * 入参为 node:test 上下文；无返回值。测试要求确实尝试一次安装，随后清理 pending、保留
- * 旧无效 Keychain，并以固定失败提示安全结束。
+ * 使用场景：pending 已校验且 iCloud 正式/backup 仍缺失，但非覆盖 copy 安装失败。入参为
+ * node:test 上下文；无返回值。测试要求确实尝试一次 copy 且不调用 move，随后清理 pending、
+ * 保留旧无效 Keychain，并以固定失败提示安全结束。
  */
 test("App 修复旧 Keychain 时安装候选失败会保留旧键", async (t) => {
   const invalidLegacyJson = runtimeConfigJson({ schemaVersion: 2 });
@@ -1269,14 +1271,15 @@ test("App 修复旧 Keychain 时安装候选失败会保留旧键", async (t) =>
       },
       { index: 0 }
     ],
-    iCloudFailures: { moveAtCall: 1 },
+    iCloudFailures: { copy: true },
     keychainValues: { [RUNTIME_CONFIG_KEY]: invalidLegacyJson },
     runsInApp: true
   });
   cleanupRuntimeDirectories(t, result);
 
   assert.equal(result.alerts.at(-1).title, "保存失败");
-  assert.equal(result.iCloudFileObservations.moveCalls, 1);
+  assert.equal(result.iCloudFileObservations.copyCalls, 1);
+  assert.equal(result.iCloudFileObservations.moveCalls, 0);
   assert.equal(result.keychain[RUNTIME_CONFIG_KEY], invalidLegacyJson);
   assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), false);
   assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
@@ -1737,6 +1740,8 @@ test("Keychain 迁移确认后写入 iCloud 五字段 envelope 并删除旧键",
   assert.equal(migratedConfig.teslaMateWebUrl, SENTINEL_WEB_URL);
   assert.equal(new Date(migratedConfig.updatedAt).toISOString(), migratedConfig.updatedAt);
   assert.equal(Object.hasOwn(result.keychain, RUNTIME_CONFIG_KEY), false);
+  assert.equal(result.iCloudFileObservations.copyCalls, 1);
+  assert.equal(result.iCloudFileObservations.moveCalls, 0);
   assert.equal(result.requests.length, 0);
   assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
 });
@@ -1814,6 +1819,180 @@ test("Keychain 迁移 pending 校验后 backup 出现时保留双方正文", asy
   );
   assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), false);
   assert.equal(result.keychain[RUNTIME_CONFIG_KEY], legacyJson);
+  assert.equal(result.alerts.at(-1).title, "迁移失败");
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+});
+
+/**
+ * 验证双缺失 gate 已返回后、非覆盖 copy 开始前出现的正式文件不会被迁移覆盖。
+ *
+ * 使用场景：第一次加载和 pending 后 gate 都看见正式/backup 缺失，但 iCloud 可在 gate 最后
+ * 一次 backup 检查返回后同步正式文件。入参为 node:test 上下文；无返回值。relativePath
+ * 事件只在 backup 的第二次检查（gate）后排队，并在 copy 前落盘；copy 必须失败，正式正文
+ * 与旧 Keychain 逐字保留，legacy 分支不得执行 move 或创建业务副作用。
+ */
+test("Keychain 迁移 gate 后正式文件在 copy 前出现时非覆盖失败", async (t) => {
+  const legacyJson = runtimeConfigJson();
+  const synchronizedConfig = iCloudConfigJson({
+    updatedAt: "2026-07-18T11:00:00.000Z",
+    amapApiKey: "post-gate-formal-sentinel-key",
+    teslaMateApiBaseUrl: "https://post-gate-api.example.test",
+    teslaMateWebUrl: "https://post-gate-web.example.test"
+  });
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }, { index: 0 }],
+    iCloudFileEvents: [{
+      afterOperation: "fileExists",
+      atCall: 2,
+      relativePath: ICLOUD_BACKUP_PATH,
+      beforeOperation: "copy",
+      files: { [ICLOUD_CONFIG_PATH]: synchronizedConfig }
+    }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: legacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(
+    fs.readFileSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH), "utf8"),
+    synchronizedConfig
+  );
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], legacyJson);
+  assert.equal(result.iCloudFileObservations.copyCalls, 1);
+  assert.equal(result.iCloudFileObservations.moveCalls, 0);
+  assert.equal(result.alerts.at(-1).title, "迁移失败");
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+});
+
+/**
+ * 验证双缺失 gate 返回后、copy 前出现的 backup 会在成功前复核中阻止迁移。
+ *
+ * 使用场景：backup 不是 copy 的目标，因此非覆盖 copy 本身可成功；legacy 分支仍必须在返回
+ * 成功前复查 backup，并只删除仍逐字段等于本事务候选的正式文件。入参为 node:test 上下文；
+ * 无返回值。同步 backup 与旧键逐字保留，候选和 pending 清理，零 Request、零 local 缓存。
+ */
+test("Keychain 迁移 gate 后 backup 在 copy 前出现时复核中止", async (t) => {
+  const legacyJson = runtimeConfigJson();
+  const synchronizedBackup = iCloudConfigJson({
+    updatedAt: "2026-07-18T12:00:00.000Z",
+    amapApiKey: "post-gate-backup-sentinel-key"
+  });
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }, { index: 0 }],
+    iCloudFileEvents: [{
+      afterOperation: "fileExists",
+      atCall: 2,
+      relativePath: ICLOUD_BACKUP_PATH,
+      beforeOperation: "copy",
+      files: { [ICLOUD_BACKUP_PATH]: synchronizedBackup }
+    }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: legacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(
+    fs.readFileSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH), "utf8"),
+    synchronizedBackup
+  );
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), false);
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], legacyJson);
+  assert.equal(result.iCloudFileObservations.copyCalls, 1);
+  assert.equal(result.iCloudFileObservations.moveCalls, 0);
+  assert.equal(result.alerts.at(-1).title, "迁移失败");
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+});
+
+/**
+ * 验证 candidate copy 完成后出现 backup 时，成功前复核仍会移除本事务候选并中止。
+ *
+ * 使用场景：copy 的非覆盖原语只能保护正式目标，无法阻止随后出现独立 backup。入参为
+ * node:test 上下文；无返回值。事件在成功 copy 返回后立即同步 backup；保存流程必须验证
+ * 正式仍等于 candidate 后移除它，逐字保留 backup 和旧键，并保持零业务副作用。
+ */
+test("Keychain 迁移 copy 后 backup 出现时移除本事务候选并中止", async (t) => {
+  const legacyJson = runtimeConfigJson();
+  const synchronizedBackup = iCloudConfigJson({
+    updatedAt: "2026-07-18T13:00:00.000Z",
+    amapApiKey: "post-copy-backup-sentinel-key"
+  });
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }, { index: 0 }],
+    iCloudFileEvents: [{
+      afterOperation: "copy",
+      atCall: 1,
+      files: { [ICLOUD_BACKUP_PATH]: synchronizedBackup }
+    }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: legacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(
+    fs.readFileSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH), "utf8"),
+    synchronizedBackup
+  );
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), false);
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], legacyJson);
+  assert.equal(result.iCloudFileObservations.copyCalls, 1);
+  assert.equal(result.iCloudFileObservations.moveCalls, 0);
+  assert.equal(result.alerts.at(-1).title, "迁移失败");
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+});
+
+/**
+ * 验证 candidate copy 后若正式文件已被远端替换，失败清理不会删除远端正文。
+ *
+ * 使用场景：copy 后 backup 出现会触发中止，但清理正式文件前仍存在远端替换窗口。入参为
+ * node:test 上下文；无返回值。事件在 copy 完成后等待成功前 backup fileExists 复核，在该
+ * 操作开始前同时写入远端正式和 backup；两者与旧键必须逐字保留，pending 清理且零副作用。
+ */
+test("Keychain 迁移 copy 后正式被远端替换时不删除远端正文", async (t) => {
+  const legacyJson = runtimeConfigJson();
+  const remoteConfig = iCloudConfigJson({
+    updatedAt: "2026-07-18T14:00:00.000Z",
+    amapApiKey: "post-copy-remote-formal-sentinel-key"
+  });
+  const synchronizedBackup = iCloudConfigJson({
+    updatedAt: "2026-07-18T14:30:00.000Z",
+    amapApiKey: "post-copy-remote-backup-sentinel-key"
+  });
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }, { index: 0 }],
+    iCloudFileEvents: [{
+      afterOperation: "copy",
+      atCall: 1,
+      beforeOperation: "fileExists",
+      files: {
+        [ICLOUD_CONFIG_PATH]: remoteConfig,
+        [ICLOUD_BACKUP_PATH]: synchronizedBackup
+      }
+    }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: legacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(
+    fs.readFileSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH), "utf8"),
+    remoteConfig
+  );
+  assert.equal(
+    fs.readFileSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH), "utf8"),
+    synchronizedBackup
+  );
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], legacyJson);
+  assert.equal(result.iCloudFileObservations.copyCalls, 1);
+  assert.equal(result.iCloudFileObservations.moveCalls, 0);
   assert.equal(result.alerts.at(-1).title, "迁移失败");
   assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
   assert.equal(result.requests.length, 0);
@@ -2090,6 +2269,97 @@ test("FileManager createDirectory 仅在 intermediateDirectories 为 true 时递
 });
 
 /**
+ * 验证 runtime 的 FileManager.copy 遵循 Scriptable 非覆盖复制契约。
+ *
+ * 使用场景：legacy 迁移必须依赖目标已存在时失败的原语关闭 gate 后覆盖窗口。入参为
+ * node:test 上下文；无返回值。测试先复制到空目标并确认源文件仍在，再尝试复制到已有
+ * 目标，后者必须失败且源、目标正文逐字不变；安全快照只记录调用次数与长度。
+ */
+test("FileManager copy 非覆盖复制且目标存在时双方正文不变", async (t) => {
+  const sourceBody = "sentinel-copy-source-body";
+  const existingBody = "sentinel-copy-existing-body";
+  const result = await runScriptableScript({
+    iCloudFiles: {
+      "teslamate/source.json": sourceBody,
+      "teslamate/existing.json": existingBody
+    },
+    scriptPath: writeRuntimeTestScript(t, `
+      const cloud = FileManager.iCloud();
+      const root = cloud.documentsDirectory();
+      const source = cloud.joinPath(root, "teslamate/source.json");
+      const copied = cloud.joinPath(root, "teslamate/copied.json");
+      const existing = cloud.joinPath(root, "teslamate/existing.json");
+
+      cloud.copy(source, copied);
+      if (cloud.readString(source) !== "${sourceBody}") throw new Error("copy removed source");
+      if (cloud.readString(copied) !== "${sourceBody}") throw new Error("copy body mismatch");
+
+      let destinationExistsFailure = false;
+      try {
+        cloud.copy(source, existing);
+      }
+      catch (error) {
+        destinationExistsFailure = true;
+      }
+      if (!destinationExistsFailure) throw new Error("copy replaced existing destination");
+      if (cloud.readString(source) !== "${sourceBody}") throw new Error("failed copy changed source");
+      if (cloud.readString(existing) !== "${existingBody}") throw new Error("failed copy changed destination");
+      Script.complete();
+    `)
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.iCloudFileObservations.copyCalls, 2);
+  assert.equal(JSON.stringify(result.iCloudFileObservations).includes(sourceBody), false);
+  assert.equal(JSON.stringify(result.iCloudFileObservations).includes(existingBody), false);
+});
+
+/**
+ * 验证相对路径事件可在指定 gate 检查后延迟到 copy 调用前落盘。
+ *
+ * 使用场景：生产竞态测试不能把文件注入在第一次同名 fileExists 之前。入参为 node:test
+ * 上下文；无返回值。配置只在 backup 的第一次检查完成后进入等待，并在下一次 copy 开始前
+ * 出现，使非覆盖 copy 失败；事件之前的 gate 结果仍为 false，双方正文逐字保留。
+ */
+test("runtime 相对路径事件可在 gate 后 copy 前注入文件", async (t) => {
+  const pendingBody = "sentinel-gate-pending-body";
+  const synchronizedBody = "sentinel-gate-config-body";
+  const result = await runScriptableScript({
+    iCloudFiles: { [ICLOUD_PENDING_PATH]: pendingBody },
+    iCloudFileEvents: [{
+      afterOperation: "fileExists",
+      atCall: 1,
+      relativePath: ICLOUD_BACKUP_PATH,
+      beforeOperation: "copy",
+      files: { [ICLOUD_CONFIG_PATH]: synchronizedBody }
+    }],
+    scriptPath: writeRuntimeTestScript(t, `
+      const cloud = FileManager.iCloud();
+      const root = cloud.documentsDirectory();
+      const pending = cloud.joinPath(root, "${ICLOUD_PENDING_PATH}");
+      const backup = cloud.joinPath(root, "${ICLOUD_BACKUP_PATH}");
+      const target = cloud.joinPath(root, "${ICLOUD_CONFIG_PATH}");
+      if (cloud.fileExists(backup)) throw new Error("gate unexpectedly saw backup");
+      let copyFailed = false;
+      try {
+        cloud.copy(pending, target);
+      }
+      catch (error) {
+        copyFailed = true;
+      }
+      if (!copyFailed) throw new Error("gate event did not block copy");
+      if (cloud.readString(pending) !== "${pendingBody}") throw new Error("pending body changed");
+      if (cloud.readString(target) !== "${synchronizedBody}") throw new Error("event body changed");
+      Script.complete();
+    `)
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.iCloudFileObservations.copyCalls, 1);
+  assert.equal(JSON.stringify(result.iCloudFileObservations).includes(synchronizedBody), false);
+});
+
+/**
  * 验证每个带路径的 FileManager I/O 都拒绝把另一实例的 documents 路径当作自身文件。
  *
  * 使用场景：runtime 同时暴露 local 和 iCloud FileManager；若任意入口没有集中校验根目录，
@@ -2121,6 +2391,18 @@ test("FileManager 全部文件 I/O 拒绝跨 local/iCloud 根目录", async (t) 
         const localSource = local.joinPath(local.documentsDirectory(), "source.json");
         local.writeString(localSource, "safe");
         local.move(localSource, cloudTarget);
+      `
+    },
+    {
+      name: "copy source",
+      source: "local.copy(cloudTarget, local.joinPath(local.documentsDirectory(), \"target.json\"));"
+    },
+    {
+      name: "copy destination",
+      source: `
+        const localSource = local.joinPath(local.documentsDirectory(), "source.json");
+        local.writeString(localSource, "safe");
+        local.copy(localSource, cloudTarget);
       `
     }
   ];
@@ -2244,6 +2526,16 @@ test("iCloud FileManager 支持脱敏故障注入与分阶段移动失败", asyn
   const sentinelErrorText = "sentinel-iCloud-failure-body";
   const operationCases = [
     {
+      name: "copy",
+      failureKey: "copy",
+      source: `
+        const source = cloud.joinPath(cloud.documentsDirectory(), "teslamate/source.json");
+        cloud.copy(source, target);
+      `,
+      callField: "copyCalls",
+      additionalFiles: { "teslamate/source.json": "sentinel-copy-source" }
+    },
+    {
       name: "download",
       failureKey: "download",
       source: "await cloud.downloadFileFromiCloud(target);",
@@ -2282,7 +2574,10 @@ test("iCloud FileManager 支持脱敏故障注入与分阶段移动失败", asyn
         documentsDirectory: createRuntimeDocumentsDirectory(subtest),
         iCloudDocumentsDirectory: createRuntimeICloudDocumentsDirectory(subtest),
         iCloudFailures: { [operationCase.failureKey]: error },
-        iCloudFiles: { "teslamate/config.v1.json": "sentinel-config-body" },
+        iCloudFiles: {
+          "teslamate/config.v1.json": "sentinel-config-body",
+          ...(operationCase.additionalFiles || {})
+        },
         scriptPath: writeRuntimeTestScript(subtest, `
           const cloud = FileManager.iCloud();
           const target = cloud.joinPath(cloud.documentsDirectory(), "teslamate/config.v1.json");
@@ -2294,11 +2589,18 @@ test("iCloud FileManager 支持脱敏故障注入与分阶段移动失败", asyn
       const observations = runtimeError.runtimeResult.iCloudFileObservations;
       assert.equal(observations[operationCase.callField], 1);
       assert.equal(JSON.stringify(observations).includes(sentinelErrorText), false);
-      assert.deepEqual(observations.files, [{
-        path: "teslamate/config.v1.json",
-        exists: true,
-        length: "sentinel-config-body".length
-      }]);
+      assert.deepEqual(observations.files, [
+        {
+          path: "teslamate/config.v1.json",
+          exists: true,
+          length: "sentinel-config-body".length
+        },
+        ...Object.entries(operationCase.additionalFiles || {}).map(([filePath, content]) => ({
+          path: filePath,
+          exists: true,
+          length: content.length
+        }))
+      ]);
     });
   }
 

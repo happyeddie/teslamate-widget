@@ -29,7 +29,8 @@
 - 当前实现使用 `FileManager.iCloud()` 获取 Scriptable iCloud documents 文件管理器；iCloud 文件可能仅有元数据而未下载，代码按 App 与 Widget 上下文分别处理下载状态。
 - App 使用 `downloadFileFromiCloud(path)` 等待正式文件或待恢复备份下载完成；Widget 不调用该 API，避免长时间等待占用执行预算。
 - Widget 使用 `isFileDownloaded(path)` 判断正式配置是否已有本地内容；未下载时立即降级为 `unavailable`。
-- 保存与恢复使用 `move(source, destination)` 和 `remove(path)` 管理同目录 pending/backup 工件；移动或最终校验失败时只恢复本次事务创建的 backup，并尽力清理 pending。
+- 普通保存与恢复使用 `move(source, destination)` 和 `remove(path)` 管理同目录 pending/backup 工件；移动或最终校验失败时只恢复本次事务创建的 backup，并尽力清理 pending。
+- legacy 新建使用 `copy(source, destination)` 安装 pending；按 [Scriptable FileManager 官方文档](https://docs.scriptable.app/filemanager/)，copy 在目标已存在时失败且不替换目标，而 move 会替换已有目标。copy 后仍会复读正式文件并复查 backup；Scriptable 没有 CAS，因此不支持并发编辑。
 - 配置目录通过 `createDirectory(path, true)` 显式递归创建；runtime stub 的第二参数默认为 `false`，只有传 `true` 才会创建缺失父目录。
 - Keychain 不再是日常配置源，仅在 App 中通过 `contains()` / `get()` 读取一次性旧配置，并在 `legacyMigration` 保存、正式文件复读与逐字段校验全部成功后调用 `remove()`；Widget 永不访问 Keychain。
 - `Alert` 文本框只能用于 alert 展示，不能用于 action sheet；取消动作统一返回 `-1`。Widget 刷新不应展示交互式 Alert，配置表单只在 `config.runsInApp` 路径使用。
@@ -57,7 +58,8 @@
 | `FileManager.createDirectory(path, true)` | App 明确保存时递归创建 `teslamate/` 配置目录 | `Telsa Car.js` 的 `prepareICloudSave()` |
 | `FileManager.isFileDownloaded()` | Widget 判断正式 iCloud 配置是否可本地读取；未下载即返回 `unavailable` | `Telsa Car.js` 的 `loadRuntimeConfig()` Widget 分支 |
 | `FileManager.downloadFileFromiCloud()` | App 下载正式或待恢复备份后再完整验证 | `Telsa Car.js` 的 `loadRuntimeConfig()` / `restoreBackupConfigInApp()` / `removeInvalidConfigArtifactsForRepair()` |
-| `FileManager.move()` / `remove()` | App 完成 pending、正式与 backup 的事务替换、恢复和工件清理 | `Telsa Car.js` 的 `saveRuntimeConfig()` / `restoreBackupConfigInApp()` / `tryRemoveConfigArtifact()` |
+| `FileManager.copy()` | legacy pending 以目标存在即失败的方式新建正式配置，与普通替换事务互斥 | `Telsa Car.js` 的 `saveRuntimeConfig()` legacy 分支 |
+| `FileManager.move()` / `remove()` | 普通 App 保存完成 pending、正式与 backup 的事务替换、恢复和本事务工件清理 | `Telsa Car.js` 的 `saveRuntimeConfig()` 普通分支 / `restoreBackupConfigInApp()` / `tryRemoveConfigArtifact()` |
 | `Keychain.contains()` / `get()` / `remove()` | 仅 App 在正式与 backup 都缺失时读取一次性旧配置；`legacyMigration` 安装与复读校验成功后删除旧键 | `Telsa Car.js` 的 `loadLegacyMigrationCandidate()` / `presentLegacyMigrationPrompt()` |
 | `Alert` | App 内 missing/unavailable/invalid/迁移菜单、安全配置表单和状态提示 | `Telsa Car.js` 的 `presentMissingConfigMenu()` / `presentUnavailableConfigMenu()` / `presentInvalidConfigMenu()` / `presentLegacyMigrationPrompt()` / `presentConfigForm()` |
 | `FileManager.local()` | 配置门禁通过后才初始化车辆、地图和地理编码缓存 | `Telsa Car.js` 的 `createRuntimeContext()` |

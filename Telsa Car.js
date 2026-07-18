@@ -519,6 +519,39 @@ function verifyICloudArtifactsMissingForLegacySave(storage) {
 }
 
 /**
+ * 判断保存来源是否只能创建全新的 iCloud 正式文件。
+ *
+ * 使用场景：有效旧 Keychain 迁移与无效旧 Keychain 显式修复都只在初始双缺失状态获得
+ * 创建授权，不能进入普通配置的覆盖事务。入参为 `saveRuntimeConfig()` 的可选模式字符串；
+ * `legacyInvalid` 或 `legacyMigration` 返回 true，其余模式返回 false。方法不访问存储。
+ */
+function isLegacyConfigSaveMode(repairMode) {
+  return repairMode === "legacyInvalid" || repairMode === "legacyMigration";
+}
+
+/**
+ * 仅在正式文件仍逐字段等于本事务候选时尽力移除 legacy candidate。
+ *
+ * 使用场景：非覆盖 copy 成功后若 backup 出现、最终复读失败或远端替换正式文件，legacy
+ * 保存必须中止；但失败清理不能无条件删除可能已被远端替换的正式正文。入参为同一 iCloud
+ * 存储集合与已验证候选；无业务返回值。方法重新读取并完整验证正式文件，只有 ready 且
+ * 五字段严格相等时才删除；内容不同、无效、暂不可读或删除失败都保留现状并记录固定日志。
+ */
+function tryRemoveLegacyCandidateIfStillCurrent(storage, candidate) {
+  try {
+    const currentResult = readAndValidateICloudConfig(storage.fm, storage.configPath);
+    // 读到本事务候选才拥有删除授权；远端替换、损坏或暂不可读都不得触碰正式路径。
+    if (currentResult.status === "ready" && configsEqual(currentResult.value, candidate)) {
+      storage.fm.remove(storage.configPath);
+    }
+  }
+  catch (error) {
+    // 清理失败不能传播路径或正文，也不能转而删除 backup 或其他云端工件。
+    console.log("legacy 运行配置候选清理失败");
+  }
+}
+
+/**
  * 在 pending 已完整校验后验证并删除用户明确授权替换的无效工件。
  *
  * 使用场景：App 的“修复配置”入口允许解除无效 backup 导致的普通事务死锁。入参为同一
@@ -567,7 +600,8 @@ async function removeInvalidConfigArtifactsForRepair(storage) {
  * 使用场景：App 表单或旧 Keychain 迁移经用户确认后调用。入参为任意业务配置和可选修复
  * 来源模式；普通保存省略，iCloud 无效工件传 `iCloudInvalid`，旧 Keychain 无效且 iCloud
  * 工件缺失传 `legacyInvalid`，有效旧 Keychain 确认迁移传 `legacyMigration`。两个 legacy
- * 模式都必须在 pending 完整校验后、任何正式/backup 移动前重新确认云端工件仍全部缺失。
+ * 模式都必须在 pending 完整校验后重新确认云端工件仍全部缺失，再以非覆盖 copy 安装，
+ * 与普通 backup/move 替换事务完全互斥；copy 后还要在返回成功前复查 backup。
  * 成功返回 `{ ok: true, value }`，value 是完成两次写后读校验的五字段 envelope；校验或
  * 任何 iCloud 步骤失败返回固定脱敏结果。
  * `backupCreatedByTransaction` 仅在正式成功移到 backup 后置位，
@@ -597,6 +631,7 @@ async function saveRuntimeConfig(input, repairMode = null) {
 
   let backupCreatedByTransaction = false;
   let candidateInstalled = false;
+  const legacySaveMode = isLegacyConfigSaveMode(repairMode);
   try {
     await prepareICloudSave(storage, repairMode);
     storage.fm.writeString(storage.pendingPath, JSON.stringify(candidate));
@@ -611,30 +646,49 @@ async function saveRuntimeConfig(input, repairMode = null) {
       await removeInvalidConfigArtifactsForRepair(storage);
     }
     // 两种 legacy 来源都没有替换云端工件的授权；pending 验证后必须重新确认两者仍缺失。
-    else if (repairMode === "legacyInvalid" || repairMode === "legacyMigration") {
+    else if (legacySaveMode) {
       verifyICloudArtifactsMissingForLegacySave(storage);
     }
 
-    // 只有正式确实存在时才创建本次 backup；move 成功后立即置位供 catch 精确恢复。
-    if (storage.fm.fileExists(storage.configPath)) {
-      storage.fm.move(storage.configPath, storage.backupPath);
-      backupCreatedByTransaction = true;
+    // legacy 只有“新建”授权，必须使用目标存在即失败的 copy，且绝不创建或接管 backup。
+    if (legacySaveMode) {
+      storage.fm.copy(storage.pendingPath, storage.configPath);
+      candidateInstalled = true;
     }
-    storage.fm.move(storage.pendingPath, storage.configPath);
-    candidateInstalled = true;
+    else {
+      // 普通保存才允许把已有正式文件移为本次 backup；move 成功后置位供 catch 精确恢复。
+      if (storage.fm.fileExists(storage.configPath)) {
+        storage.fm.move(storage.configPath, storage.backupPath);
+        backupCreatedByTransaction = true;
+      }
+      storage.fm.move(storage.pendingPath, storage.configPath);
+      candidateInstalled = true;
+    }
 
     const finalResult = readAndValidateICloudConfig(storage.fm, storage.configPath);
     // 正式写后读必须再次完整校验并逐字段匹配，防止同步或文件系统窗口产生静默错写。
     if (finalResult.status !== "ready" || !configsEqual(finalResult.value, candidate)) {
       throw new Error("final-validation-failed");
     }
-    tryRemoveConfigArtifact(storage.fm, storage.backupPath);
+    // copy 无法保护独立 backup 路径；legacy 返回成功前必须复查，发现即进入候选安全清理。
+    if (legacySaveMode && storage.fm.fileExists(storage.backupPath)) {
+      throw new Error("legacy-backup-appeared-after-copy");
+    }
+    // 只有普通替换事务拥有清理 backup 的授权；legacy 无论成功或失败都不得删除它。
+    if (!legacySaveMode) {
+      tryRemoveConfigArtifact(storage.fm, storage.backupPath);
+    }
     return { ok: true, value: candidate };
   }
   catch (error) {
-    // 只有本次候选确实安装后才删除正式文件，候选尚未安装时绝不触碰正式路径。
+    // legacy 必须复读确认正式仍是本事务候选；普通事务沿用 candidateInstalled 精确清理。
     if (candidateInstalled) {
-      tryRemoveConfigArtifact(storage.fm, storage.configPath);
+      if (legacySaveMode) {
+        tryRemoveLegacyCandidateIfStillCurrent(storage, candidate);
+      }
+      else {
+        tryRemoveConfigArtifact(storage.fm, storage.configPath);
+      }
     }
     // 只有本次事务确实创建了 backup 才尝试恢复，不能移动既有或无关 backup。
     if (backupCreatedByTransaction) {
