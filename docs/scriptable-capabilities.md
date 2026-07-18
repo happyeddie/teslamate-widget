@@ -1,6 +1,6 @@
 # Scriptable 能力与开发依据
 
-本文档整理 Scriptable 作为本项目基座的能力边界。后续 AI 修改 `Telsa Car.js` 前应先阅读本文件。
+本文档整理 Scriptable 作为本项目基座的能力边界。修改 `Telsa Car.js` 前应先阅读本文件。
 
 ## 官方依据
 
@@ -26,11 +26,12 @@
 - iOS widget 存在内存限制；官方 `ListWidget` 文档明确提示使用过多内存会导致 widget 崩溃或无法正确渲染。
 - `ListWidget.refreshAfterDate` 表示最早可刷新时间，不保证 iOS 会在该时间点刷新。
 - 锁屏 accessory widget 从 iOS 16 开始可用，`config.widgetFamily` 可能是 `accessoryCircular`、`accessoryInline`、`accessoryRectangular` 等。
-- 目标 iCloud 配置架构将使用 `FileManager.iCloud()` 获取 Scriptable iCloud documents 文件管理器；iCloud 文件可能仅有元数据而未下载，后续实现访问内容前需按运行上下文处理下载状态。
-- 目标 iCloud 配置架构将由 App 使用 `downloadFileFromiCloud(path)` 等待指定文件下载完成；后续 Widget 实现不得调用，避免长时间等待占用执行预算。
-- 目标 iCloud 配置架构将由 Widget 使用 `isFileDownloaded(path)` 判断正式配置是否已有本地内容；后续实现未下载时必须安全降级为 `unavailable`。
-- 目标 iCloud 配置架构将使用 `move(source, destination)` 与 `remove(path)` 完成同一配置目录内的 pending/backup 保存事务与恢复；后续实现中移动和最终校验失败时只能恢复本次事务创建的 backup，并尽力清理 pending。
-- 当前代码的 `Keychain.set()` 只接受字符串值，并将其存入加密数据库。目标 iCloud 配置架构实施后，Keychain 仅用于 App 一次性迁移旧配置 `teslamate-widget.config.v1` 的 `contains()`、`get()` 与迁移成功后的 `remove()`，Widget 永不访问 Keychain。
+- 当前实现使用 `FileManager.iCloud()` 获取 Scriptable iCloud documents 文件管理器；iCloud 文件可能仅有元数据而未下载，代码按 App 与 Widget 上下文分别处理下载状态。
+- App 使用 `downloadFileFromiCloud(path)` 等待正式文件或待恢复备份下载完成；Widget 不调用该 API，避免长时间等待占用执行预算。
+- Widget 使用 `isFileDownloaded(path)` 判断正式配置是否已有本地内容；未下载时立即降级为 `unavailable`。
+- 保存与恢复使用 `move(source, destination)` 和 `remove(path)` 管理同目录 pending/backup 工件；移动或最终校验失败时只恢复本次事务创建的 backup，并尽力清理 pending。
+- 配置目录通过 `createDirectory(path, true)` 显式递归创建；runtime stub 的第二参数默认为 `false`，只有传 `true` 才会创建缺失父目录。
+- Keychain 不再是日常配置源，仅在 App 中通过 `contains()` / `get()` 读取一次性旧配置，并在 `legacyMigration` 保存、正式文件复读与逐字段校验全部成功后调用 `remove()`；Widget 永不访问 Keychain。
 - `Alert` 文本框只能用于 alert 展示，不能用于 action sheet；取消动作统一返回 `-1`。Widget 刷新不应展示交互式 Alert，配置表单只在 `config.runsInApp` 路径使用。
 
 ## 官方 API 能力总览
@@ -45,28 +46,29 @@
 - iOS 系统服务：`Calendar`、`CalendarEvent`、`Reminder`、`Contact`、`ContactsContainer`、`ContactsGroup`、`Location`、`Notification`、`Photos`、`Safari`、`Speech`、`Dictation`、`Device`、`Timer`。
 - 集成入口：`CallbackURL`、`URLScheme`、Siri Shortcuts、Share Sheet Extension、x-callback-url。
 
-## 当前实现与目标 iCloud 架构 API
+## 当前实现使用的 API
 
-| 能力 | 当前用途或目标设计约定 | 当前代码位置或后续实现位置 |
+| 能力 | 当前用途 | 当前代码位置 |
 | --- | --- | --- |
-| `args.widgetParameter` | 解析车 ID 和主题参数 | `Telsa Car.js:4` |
-| `config.runsInApp` | `main()` 中：配置缺失时进入表单；已配置时显示菜单，按用户选择管理配置或打开 TeslaMate WebView | `main()` 的 App 配置门禁与 App 菜单分支 |
+| `args.widgetParameter` | 解析车 ID 和主题参数 | `Telsa Car.js` 的 `parseWidgetParameters()` / `main()` |
+| `config.runsInApp` | `main()` 中先执行配置门禁；missing 先显示重试/创建/取消，旧设备显示迁移确认，ready 后显示管理或打开菜单 | `Telsa Car.js` 的 `main()` / `presentNonReadyConfigInApp()` / `presentAppMenu()` |
 | `config.runsInAccessoryWidget` | `main()` 中：通过配置门禁后进入锁屏 accessory widget 渲染分支 | `main()` 的 accessory 分支 |
-| `FileManager.iCloud()` | 目标架构：构造 `teslamate/config.v1.json` 及同目录 pending/backup 配置工件路径 | 后续 `loadRuntimeConfig()` / `saveRuntimeConfig()` 实现位置 |
-| `FileManager.isFileDownloaded()` | 目标架构：Widget 判断正式 iCloud 配置是否可本地读取；未下载即返回 `unavailable` | 后续 `loadRuntimeConfig()` 的 Widget 配置门禁 |
-| `FileManager.downloadFileFromiCloud()` | 目标架构：App 下载正式或待恢复备份配置后再读取验证 | 后续 `loadRuntimeConfig()` 的 App 配置门禁与恢复分支 |
-| `FileManager.move()` / `remove()` | 目标架构：App 保存时完成 pending、正式与 backup 的事务替换、恢复和清理 | 后续 `saveRuntimeConfig()` 实现位置 |
-| `Keychain.contains()` / `get()` / `remove()` | 当前代码读取日常配置；目标架构实施后仅 App 在 iCloud 正式与备份文件均不存在时读取一次性旧配置，迁移校验成功后删除 | 当前 `Telsa Car.js:185`, `Telsa Car.js:220`；后续 `loadRuntimeConfig()` / `migrateLegacyConfig()` |
-| `Alert` | App 内操作菜单、安全配置表单和状态提示 | `Telsa Car.js:238`, `Telsa Car.js:274`, `Telsa Car.js:398` |
-| `FileManager.local()` | 配置门禁通过后缓存车辆数据、地图和地理编码 | `Telsa Car.js:323` |
-| `Request.loadJSON()` | 拉取 TeslaMateApi 车辆状态 | `Telsa Car.js:539` |
-| `Request.loadImage()` | 拉取高德静态地图 | `Telsa Car.js:639` |
-| `Location.reverseGeocode()` | 车辆坐标反向地理编码 | `Telsa Car.js:603` |
-| `ListWidget` / `WidgetStack` | 构建配置提示、桌面和锁屏 widget | `Telsa Car.js:329`, `Telsa Car.js:342` |
-| `DrawContext` / `Path` | 绘制电池、圆形电量、地图方向箭头 | `Telsa Car.js:436`, `Telsa Car.js:943`, `Telsa Car.js:1160` |
-| `SFSymbol` | 显示车辆状态、锁、车窗、空调等图标 | `Telsa Car.js:827`, `Telsa Car.js:846`, `Telsa Car.js:1064` |
-| `Script.setWidget()` / `Script.complete()` | 向系统提交 widget 并结束脚本 | `Telsa Car.js:347`, `Telsa Car.js:472` |
-| `WebView` | App 内展示 TeslaMate 原页面 | `Telsa Car.js:369` |
+| `FileManager.iCloud()` | 构造正式、pending 与 backup 固定路径，并执行读取、恢复与保存事务 | `Telsa Car.js` 的 `createICloudConfigStorage()` / `loadRuntimeConfig()` / `saveRuntimeConfig()` |
+| `FileManager.createDirectory(path, true)` | App 明确保存时递归创建 `teslamate/` 配置目录 | `Telsa Car.js` 的 `prepareICloudSave()` |
+| `FileManager.isFileDownloaded()` | Widget 判断正式 iCloud 配置是否可本地读取；未下载即返回 `unavailable` | `Telsa Car.js` 的 `loadRuntimeConfig()` Widget 分支 |
+| `FileManager.downloadFileFromiCloud()` | App 下载正式或待恢复备份后再完整验证 | `Telsa Car.js` 的 `loadRuntimeConfig()` / `restoreBackupConfigInApp()` / `removeInvalidConfigArtifactsForRepair()` |
+| `FileManager.move()` / `remove()` | App 完成 pending、正式与 backup 的事务替换、恢复和工件清理 | `Telsa Car.js` 的 `saveRuntimeConfig()` / `restoreBackupConfigInApp()` / `tryRemoveConfigArtifact()` |
+| `Keychain.contains()` / `get()` / `remove()` | 仅 App 在正式与 backup 都缺失时读取一次性旧配置；`legacyMigration` 安装与复读校验成功后删除旧键 | `Telsa Car.js` 的 `loadLegacyMigrationCandidate()` / `presentLegacyMigrationPrompt()` |
+| `Alert` | App 内 missing/unavailable/invalid/迁移菜单、安全配置表单和状态提示 | `Telsa Car.js` 的 `presentMissingConfigMenu()` / `presentUnavailableConfigMenu()` / `presentInvalidConfigMenu()` / `presentLegacyMigrationPrompt()` / `presentConfigForm()` |
+| `FileManager.local()` | 配置门禁通过后才初始化车辆、地图和地理编码缓存 | `Telsa Car.js` 的 `createRuntimeContext()` |
+| `Request.loadJSON()` | 拉取 TeslaMateApi 车辆状态 | `Telsa Car.js` 的 `getCarData()` |
+| `Request.loadImage()` | 拉取高德静态地图 | `Telsa Car.js` 的 `getCarGeo()` |
+| `Location.reverseGeocode()` | 车辆坐标反向地理编码 | `Telsa Car.js` 的 `getCarGeo()` |
+| `ListWidget` / `WidgetStack` | 构建 iCloud 同步提示、桌面和锁屏 widget | `Telsa Car.js` 的 `renderUnavailableConfigWidget()` / `renderMediumWidget()` / `renderAccessoryWidget()` |
+| `DrawContext` / `Path` | 绘制电池、圆形电量、地图与方向箭头 | `Telsa Car.js` 的 `renderAccessoryWidget()` / `renderBatteryInfo()` / `renderMap()` |
+| `SFSymbol` | 显示车辆状态、锁、车窗、空调等图标 | `Telsa Car.js` 的 `renderCarInfo()` / `renderCarStatus()` |
+| `Script.setWidget()` / `Script.complete()` | 提交提示、桌面或锁屏 widget 并结束脚本 | `Telsa Car.js` 的 `renderUnavailableConfigWidget()` / `renderAccessoryWidget()` / `main()` |
+| `WebView` | App 内展示 TeslaMate 原页面 | `Telsa Car.js` 的 `openTeslaMateWebView()` |
 
 ## 对开发的直接约束
 

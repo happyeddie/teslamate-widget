@@ -1742,6 +1742,85 @@ test("Keychain 迁移确认后写入 iCloud 五字段 envelope 并删除旧键",
 });
 
 /**
+ * 验证有效旧 Keychain 迁移在用户确认期间收到正式 iCloud 文件时安全中止。
+ *
+ * 使用场景：初次加载已确认正式与 backup 缺失，但迁移确认 Alert 展示期间另一设备可能
+ * 同步正式配置。入参为 node:test 上下文；无返回值。迁移必须逐字保留新出现的正式正文
+ * 和旧 Keychain，且本次保持零业务 Request、零 local `tesla/` 缓存并清理 pending。
+ */
+test("Keychain 迁移确认期间正式 iCloud 文件出现时保留双方正文", async (t) => {
+  const legacyJson = runtimeConfigJson();
+  const synchronizedConfig = iCloudConfigJson({
+    updatedAt: "2026-07-18T09:00:00.000Z",
+    amapApiKey: "synchronized-formal-sentinel-key",
+    teslaMateApiBaseUrl: "https://synchronized-api.example.test",
+    teslaMateWebUrl: "https://synchronized-web.example.test"
+  });
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }, { index: 0 }],
+    iCloudFileEvents: [{
+      afterOperation: "alertPresent",
+      atCall: 1,
+      files: { [ICLOUD_CONFIG_PATH]: synchronizedConfig }
+    }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: legacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(
+    fs.readFileSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH), "utf8"),
+    synchronizedConfig
+  );
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], legacyJson);
+  assert.equal(result.alerts.at(-1).title, "迁移失败");
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+});
+
+/**
+ * 验证有效旧 Keychain 迁移在 pending 完整校验后收到 backup 时安全中止。
+ *
+ * 使用场景：pending 的 readString 返回后先完成 envelope 与逐字段校验，runtime 再在下一次
+ * fileExists 前模拟 iCloud 同步 backup。入参为 node:test 上下文；无返回值。迁移不得安装
+ * 候选或清理同步正文，旧键必须逐字保留，本次保持零业务 Request 和零 local 缓存。
+ */
+test("Keychain 迁移 pending 校验后 backup 出现时保留双方正文", async (t) => {
+  const legacyJson = runtimeConfigJson();
+  const synchronizedBackup = iCloudConfigJson({
+    updatedAt: "2026-07-18T10:00:00.000Z",
+    amapApiKey: "synchronized-backup-sentinel-key",
+    teslaMateApiBaseUrl: "https://backup-api.example.test",
+    teslaMateWebUrl: "https://backup-web.example.test"
+  });
+  const result = await runScriptableScript({
+    alertResponses: [{ index: 0 }, { index: 0 }],
+    iCloudFileEvents: [{
+      afterOperation: "readString",
+      atCall: 1,
+      beforeOperation: "fileExists",
+      files: { [ICLOUD_BACKUP_PATH]: synchronizedBackup }
+    }],
+    keychainValues: { [RUNTIME_CONFIG_KEY]: legacyJson },
+    runsInApp: true
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(
+    fs.readFileSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_BACKUP_PATH), "utf8"),
+    synchronizedBackup
+  );
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_CONFIG_PATH)), false);
+  assert.equal(result.keychain[RUNTIME_CONFIG_KEY], legacyJson);
+  assert.equal(result.alerts.at(-1).title, "迁移失败");
+  assert.equal(fs.existsSync(path.join(result.iCloudDocumentsDirectory, ICLOUD_PENDING_PATH)), false);
+  assert.equal(result.requests.length, 0);
+  assert.equal(fs.existsSync(path.join(result.documentsDirectory, "tesla")), false);
+});
+
+/**
  * 验证迁移取消和 iCloud 保存失败都保留旧 Keychain 且不创建业务副作用。
  *
  * 使用场景：用户暂不迁移，或 pending 无法写入。入参为 node:test 上下文；无返回值。
@@ -1938,6 +2017,76 @@ test("runtime 将本地缓存与 iCloud 配置隔离并提供脱敏文件观测"
 
   assert.equal(result.iCloudFileObservations.downloadCalls, 1);
   assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-config-body"), false);
+});
+
+/**
+ * 验证 runtime 可在指定文件操作完成后确定性模拟 iCloud 同步工件出现。
+ *
+ * 使用场景：迁移竞态测试必须让初次检查先看到文件缺失，再在用户确认或 pending 校验后
+ * 注入云端正文。入参为 node:test 上下文；无返回值。事件正文只写入隔离 iCloud 根，不得
+ * 进入脱敏观测；事件触发前后两次存在性检查应分别返回 false 与 true。
+ */
+test("runtime 可在指定文件操作后注入 iCloud 同步工件", async (t) => {
+  const result = await runScriptableScript({
+    iCloudFileEvents: [{
+      afterOperation: "fileExists",
+      atCall: 1,
+      files: { [ICLOUD_CONFIG_PATH]: "sentinel-event-config-body" }
+    }],
+    scriptPath: writeRuntimeTestScript(t, `
+      const cloud = FileManager.iCloud();
+      const target = cloud.joinPath(cloud.documentsDirectory(), "${ICLOUD_CONFIG_PATH}");
+      if (cloud.fileExists(target)) throw new Error("event fired before target operation");
+      if (!cloud.fileExists(target)) throw new Error("event did not create target file");
+      if (cloud.readString(target) !== "sentinel-event-config-body") {
+        throw new Error("event body mismatch");
+      }
+      Script.complete();
+    `)
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.script.completed, true);
+  assert.equal(JSON.stringify(result.iCloudFileObservations).includes("sentinel-event-config-body"), false);
+});
+
+/**
+ * 验证 runtime 的 createDirectory 第二参数遵循 Scriptable 官方递归契约。
+ *
+ * 使用场景：生产代码只有显式传 `true` 才可一次创建缺失的多级目录。入参为 node:test
+ * 上下文；无返回值。false 且父目录缺失必须失败；true 必须递归成功；父目录已经存在时
+ * false 仍应创建直接子目录，避免 stub 用无条件递归掩盖生产调用错误。
+ */
+test("FileManager createDirectory 仅在 intermediateDirectories 为 true 时递归", async (t) => {
+  const result = await runScriptableScript({
+    scriptPath: writeRuntimeTestScript(t, `
+      const local = FileManager.local();
+      const root = local.documentsDirectory();
+      const missingParentChild = local.joinPath(root, "missing-parent/child");
+      let nonRecursiveFailed = false;
+      try {
+        local.createDirectory(missingParentChild, false);
+      }
+      catch (error) {
+        nonRecursiveFailed = true;
+      }
+      if (!nonRecursiveFailed) throw new Error("false unexpectedly created missing parents");
+
+      const recursiveChild = local.joinPath(root, "recursive-parent/child");
+      local.createDirectory(recursiveChild, true);
+      if (!local.isDirectory(recursiveChild)) throw new Error("true did not create parent directories");
+
+      const existingParent = local.joinPath(root, "existing-parent");
+      local.createDirectory(existingParent, false);
+      const directChild = local.joinPath(existingParent, "child");
+      local.createDirectory(directChild, false);
+      if (!local.isDirectory(directChild)) throw new Error("false could not create a direct child");
+      Script.complete();
+    `)
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(result.script.completed, true);
 });
 
 /**

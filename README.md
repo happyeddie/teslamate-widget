@@ -41,8 +41,8 @@ A [Scriptable](https://scriptable.app/) widget script for TeslaMate. It shows ve
 ## Installation and Configuration
 
 1. Copy `Telsa Car.js` into Scriptable.
-2. Open Scriptable and run the script once. On first run, the script opens a configuration form instead of making network requests.
-3. Enter the following values, then tap **Save**:
+2. Open Scriptable and run the script once. If no configuration is visible yet, the first menu offers **Retry Sync**, **Create New Configuration**, and **Cancel**. Choose **Create New Configuration** only after retrying iCloud synchronization as needed; the form does not open until you make that choice, and no vehicle-service request is made first. An older configured device instead shows a confirmation before migrating its Keychain configuration to iCloud Drive.
+3. After choosing **Create New Configuration**, enter the following values and tap **Save**:
    - **AMap API Key**: the Web Service key used by the static map request.
    - **TeslaMateApi Base URL**: the service base address, for example `https://api.example.com`. Do not append `/api/v1/cars/1/status`; the script adds the vehicle path automatically.
    - **TeslaMate Web URL**: the base address of the TeslaMate web interface, for example `https://teslamate.example.com`.
@@ -61,7 +61,7 @@ The configuration is shared through iCloud Drive when every device is signed in 
 
 If you upgrade from a Keychain-only version, run the new script **in the Scriptable app on the old configured device**. Review the migration prompt and confirm it there. Only a confirmed, validated migration removes the old Keychain entry. Do not remove the old entry yourself first. A widget never migrates configuration or shows a migration form.
 
-On a second device using the same Apple Account, install the script and run it once in the Scriptable app before adding or refreshing the widget. No business values need to be entered again after the configuration has arrived. A widget deliberately does not download an iCloud placeholder: if the configuration is not downloaded yet, it shows a synchronization prompt and does not contact vehicle services. Once the configuration is downloaded, it remains readable while offline; a device that has never downloaded it remains in the safe prompt state while offline.
+On a second device using the same Apple Account, install the script and run it once in the Scriptable app before adding or refreshing the widget. No business values need to be entered again after the configuration has arrived. A widget deliberately does not download an iCloud placeholder: if the configuration is not downloaded yet, it shows a synchronization prompt and does not contact vehicle services. Offline reads work only while the system still retains a downloaded local copy; if iCloud reclaims that copy, the widget returns to the synchronization prompt until the file is available again.
 
 Edit configuration on one device at a time. Concurrent edits are unsupported: there is no merge UI, and after sequential edits each device reads the version currently visible through iCloud. This is a convenience and safety boundary, not a synchronization-completion guarantee.
 

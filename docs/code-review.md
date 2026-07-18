@@ -4,6 +4,7 @@
 
 ## 已修复
 
+- 原先业务配置需要直接修改源码；当前日常配置已迁移到 Scriptable iCloud documents 的固定 schema v1 文件，旧 Keychain 仅保留 App 内一次性迁移用途，Widget 不读取 Keychain。
 - `Telsa Car.js:4` / `Telsa Car.js:14`：原先 `args.widgetParameter` 的第一个参数既被当作主题又被当作车辆 ID，`dark` 会导致车辆 ID 变成 `dark`。现在从参数中查找数字作为车 ID，`dark,1` 和 `1,dark` 都可用。
 - `Telsa Car.js:27`：原先 `FileManager.joinPath()` 第二段传入 `/tesla`，容易和不同路径实现产生歧义。现在使用 `tesla`。
 - `Telsa Car.js:42`：原先 WebView 注入代码把 `insertRule()` 的返回值继续当对象调用，页面脚本会失败。现在改为创建 `<style>` 注入。
@@ -13,7 +14,6 @@
 
 ## 仍需后续处理
 
-- `Telsa Car.js:12` / `Telsa Car.js:17` / `Telsa Car.js:20`：配置仍是直接改源码。建议后续把用户配置集中到一个清晰的配置块，并在 README 中给出复制模板；Scriptable 没有 `.env` 标准机制，不建议引入构建流程。
 - `Telsa Car.js:6` / `Telsa Car.js:7`：`isDarkTheme` 和 `padding` 目前未参与渲染。建议后续要么接入主题样式，要么删除无效变量。
 - `Telsa Car.js:99` / `Telsa Car.js:100`：锁屏 widget 中续航里程被计算后又硬编码为 `88`，且绘制文字被注释。当前不影响圆形电量图，但会误导后续维护。
 - `Telsa Car.js:403` 到 `Telsa Car.js:670`：多处 `SFSymbol.named(...).image` 未处理返回 `null` 的情况。官方文档说明找不到符号会返回 `null`，老系统或符号名不支持时可能崩溃。

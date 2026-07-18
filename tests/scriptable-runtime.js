@@ -211,8 +211,9 @@ class TestFileManager {
    * 使用场景：同一 runtime 同时需要本地车辆缓存和 iCloud 配置文件，两者必须使用不同
    * 根目录。入参 `documentsDirectory` 是本实例唯一可操作的临时根目录；`options.kind`
    * 标记 local 或 iCloud，`downloadedFiles` 保存已下载的绝对文件路径，`observations`
-   * 仅保存路径、长度和调用次数，绝不保存文件正文。所有可选参数均由 runtime 在本次
-   * 调用内创建，避免跨测试共享可变状态。
+   * 仅保存路径、长度和调用次数，`operationHooks` 在目标操作前后驱动确定性同步事件，
+   * 绝不保存文件正文。所有可选参数均由 runtime 在本次调用内创建，避免跨测试共享可变
+   * 状态。
    */
   constructor(documentsDirectory, options = {}) {
     this.documents = documentsDirectory;
@@ -221,6 +222,7 @@ class TestFileManager {
     this.failures = options.failures || {};
     this.observations = options.observations || null;
     this.observedFilePaths = new Set();
+    this.operationHooks = options.operationHooks || null;
     this.readOverrides = options.readOverrides || {};
   }
 
@@ -230,12 +232,13 @@ class TestFileManager {
    * 在当前 FileManager 实例的 documents 根内创建目录。
    *
    * 使用场景：本地缓存和 iCloud 配置都可创建其自身子目录，但不得借此跨越两类根目录。
-   * 入参为目标目录路径；路径校验会先规范化并拒绝根外、`..` 或另一实例的绝对路径，成功
-   * 后递归创建目录。无正常返回值，拒绝错误不包含调用方传入路径，避免意外暴露文件信息。
+   * 入参为目标目录路径及可选 `intermediateDirectories`；路径校验会先规范化并拒绝根外、
+   * `..` 或另一实例的绝对路径。第二参数为 false 时只创建目标目录且父目录必须已存在，
+   * true 时才递归创建缺失父目录。无正常返回值，拒绝错误不包含调用方传入路径。
    */
-  createDirectory(filePath) {
+  createDirectory(filePath, intermediateDirectories = false) {
     const safePath = this.assertPathInDocuments(filePath);
-    fs.mkdirSync(safePath, { recursive: true });
+    fs.mkdirSync(safePath, { recursive: intermediateDirectories });
   }
   documentsDirectory() { return this.documents; }
 
@@ -248,9 +251,13 @@ class TestFileManager {
    */
   fileExists(filePath) {
     const safePath = this.assertPathInDocuments(filePath);
+    this.operationHooks?.before("fileExists");
     this.recordFileOperation("fileExists", safePath);
     this.throwFileFailure("fileExists");
-    return fs.existsSync(safePath);
+    const exists = fs.existsSync(safePath);
+    // 同步事件必须在本次存在性结果确定后才落盘，使调用方本次看到旧状态、下次看到新状态。
+    this.operationHooks?.after("fileExists");
+    return exists;
   }
 
   /**
@@ -421,14 +428,20 @@ class TestFileManager {
    */
   readString(filePath) {
     const safePath = this.assertPathInDocuments(filePath);
+    this.operationHooks?.before("readString");
     this.recordFileOperation("readString", safePath);
     this.throwFileFailure("readString");
     const relativePath = path.relative(this.documents, safePath);
     const overrides = this.readOverrides[relativePath];
     if (Array.isArray(overrides) && overrides.length > 0) {
-      return overrides.shift();
+      const overriddenValue = overrides.shift();
+      // 延迟事件从 readString 完成后开始等待，确保随后生产校验已拿到本次固定返回值。
+      this.operationHooks?.after("readString");
+      return overriddenValue;
     }
-    return fs.readFileSync(safePath, "utf8");
+    const content = fs.readFileSync(safePath, "utf8");
+    this.operationHooks?.after("readString");
+    return content;
   }
 
   temporaryDirectory() { return os.tmpdir(); }
@@ -593,6 +606,7 @@ function serialize(value) {
  * widget、缓存及配置流程的业务结果。入参 `options` 可覆盖脚本路径、documents
  * 目录、网络/定位响应、运行上下文，以及 `keychainValues`、`keychainFailures`、
  * `iCloudFiles`、`iCloudDownloadedFiles`、`iCloudFailures`、`iCloudReadOverrides`、
+ * `iCloudFileEvents`、
  * `failImages` 和 `alertResponses`；`keychainValues` 与 `keychainFailures` 仅为旧配置
  * 一次性迁移、日常路径不触碰 Keychain 的哨兵，以及 runtime API 兼容测试保留。未传入
  * 的可选项使用测试安全的默认值。
@@ -600,7 +614,9 @@ function serialize(value) {
  * 值或 Error：true 使用向后兼容的固定 Mock Error，Error 实例则原样抛出，供安全测试
  * 携带虚构敏感信息。成功时返回 documents 路径、请求/日志/Widget/WebView 快照、Keychain
  * 写入的脱敏观测、生命周期、iCloud 文件元数据以及最终 Keychain 和 Alert 观测；返回值
- * `iCloudReadOverrides` 的队列值会原样返回，可包含 null 或其他非字符串以模拟桥接异常。
+ * `iCloudReadOverrides` 的队列值会原样返回，可包含 null 或其他非字符串以模拟桥接异常；
+ * `iCloudFileEvents` 可在目标操作完成后立即写入隔离文件，或等到指定下一操作前再写入，
+ * 用于稳定复现用户交互和文件校验之间的 iCloud 同步竞态。
  * 所有结果均不持有内部可变集合。iCloud 文件结果只包含路径、存在性和长度，绝不包含正文。
  * VM 异常会原样向调用方抛出，同时附加不含异常详情的 `runtimeResult` 快照，便于安全测试
  * 断言错误期间的日志、Alert 与 Widget 输出；交互响应不足仍使用固定错误供测试精确断言。
@@ -624,6 +640,8 @@ async function runScriptableScript(options = {}) {
   const logs = [];
   const keychainSetCalls = [];
   const lifecycle = [];
+  const iCloudOperationCalls = {};
+  const pendingICloudFileEvents = [];
   /**
    * 维护当前运行的用户交互状态和安全配置状态。
    *
@@ -641,21 +659,91 @@ async function runScriptableScript(options = {}) {
     ? options.alertResponses.map((response) => clone(response))
     : [];
   /**
-   * 在 iCloud 临时根预置虚构配置文件。
+   * 将测试夹具的虚构文件安全写入隔离 iCloud documents。
    *
-   * 使用场景：测试需要模拟 Scriptable iCloud documents 中已存在但尚未下载的文件。
-   * 键必须是相对路径，值按 UTF-8 写入隔离根目录；路径逃逸会立即抛错，确保 runtime
-   * 永不触碰临时根以外的真实目录。写入过程不计入观测，因为它是测试夹具而非脚本操作。
+   * 使用场景：初始 `iCloudFiles` 与运行中 `iCloudFileEvents` 共用相同路径隔离规则。入参
+   * `files` 为相对路径到 UTF-8 正文的映射；无返回值。路径逃逸立即抛固定错误，正文只写
+   * 临时根且不计入脱敏操作观测，避免两套夹具实现产生不同安全边界。
    */
-  for (const [relativePath, content] of Object.entries(options.iCloudFiles || {})) {
-    const destinationPath = path.resolve(iCloudDocumentsDirectory, relativePath);
-    const resolvedRelativePath = path.relative(iCloudDocumentsDirectory, destinationPath);
-    if (resolvedRelativePath === ".." || resolvedRelativePath.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(relativePath)) {
-      throw new Error("iCloudFiles path must be relative to iCloud documents");
+  function materializeICloudFiles(files) {
+    for (const [relativePath, content] of Object.entries(files || {})) {
+      const destinationPath = path.resolve(iCloudDocumentsDirectory, relativePath);
+      const resolvedRelativePath = path.relative(iCloudDocumentsDirectory, destinationPath);
+      // 绝对路径或解析到根外的相对路径都可能触碰真实文件，必须在 mkdir/write 前拒绝。
+      if (resolvedRelativePath === ".." || resolvedRelativePath.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativePath)) {
+        throw new Error("iCloudFiles path must be relative to iCloud documents");
+      }
+      fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+      fs.writeFileSync(destinationPath, content, "utf8");
     }
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    fs.writeFileSync(destinationPath, content, "utf8");
+  }
+
+  materializeICloudFiles(options.iCloudFiles);
+
+  /**
+   * 复制并验证运行中 iCloud 文件事件的最小调度字段。
+   *
+   * 使用场景：竞态测试按 `afterOperation` 的第 `atCall` 次完成点触发；可选
+   * `beforeOperation` 让文件延迟到后续目标操作开始前才出现。入参来自测试 options；
+   * 返回独立事件数组，避免 runtime 消费状态反向修改调用方对象。无效事件直接抛错，防止
+   * 拼写错误让安全测试静默退化为“从未注入”。
+   */
+  const iCloudFileEvents = (options.iCloudFileEvents || []).map((event) => {
+    if (!event || typeof event.afterOperation !== "string" ||
+      !Number.isInteger(event.atCall) || event.atCall < 1 ||
+      !event.files || typeof event.files !== "object") {
+      throw new Error("Invalid iCloudFileEvents entry");
+    }
+    return {
+      afterOperation: event.afterOperation,
+      atCall: event.atCall,
+      beforeOperation: typeof event.beforeOperation === "string" ? event.beforeOperation : null,
+      files: { ...event.files },
+      triggered: false
+    };
+  });
+
+  /**
+   * 在目标 runtime 操作开始前落实已到期的延迟 iCloud 文件事件。
+   *
+   * 使用场景：pending readString 完成后需先让生产代码执行同步 envelope 校验，再在下一次
+   * fileExists 前模拟 backup 出现。入参为即将开始的固定操作名；无返回值。只消费匹配的
+   * 延迟事件，其余事件继续等待，文件正文不会进入观测。
+   */
+  function beforeRuntimeOperation(operation) {
+    for (let index = pendingICloudFileEvents.length - 1; index >= 0; index -= 1) {
+      const event = pendingICloudFileEvents[index];
+      // 只有明确指定的后续操作可触发，避免无关日志或 UI 调用改变竞态时间点。
+      if (event.beforeOperation === operation) {
+        materializeICloudFiles(event.files);
+        pendingICloudFileEvents.splice(index, 1);
+      }
+    }
+  }
+
+  /**
+   * 记录目标操作完成次数，并触发对应的即时或延迟 iCloud 文件事件。
+   *
+   * 使用场景：Alert 确认完成、FileManager 读取或存在性检查返回前都调用本边界。入参为
+   * 固定操作名；无返回值。同一事件只触发一次；带 `beforeOperation` 的事件进入等待队列，
+   * 其余事件立即写入，从而让当前操作结果保持事件发生前的状态。
+   */
+  function afterRuntimeOperation(operation) {
+    iCloudOperationCalls[operation] = (iCloudOperationCalls[operation] || 0) + 1;
+    for (const event of iCloudFileEvents) {
+      if (event.triggered || event.afterOperation !== operation ||
+        event.atCall !== iCloudOperationCalls[operation]) {
+        continue;
+      }
+      event.triggered = true;
+      if (event.beforeOperation) {
+        pendingICloudFileEvents.push(event);
+      }
+      else {
+        materializeICloudFiles(event.files);
+      }
+    }
   }
   const downloadedFiles = new Set((options.iCloudDownloadedFiles || []).map((relativePath) =>
     path.resolve(iCloudDocumentsDirectory, relativePath)
@@ -671,6 +759,10 @@ async function runScriptableScript(options = {}) {
     downloadedFiles,
     failures: options.iCloudFailures || {},
     kind: "iCloud",
+    operationHooks: {
+      after: afterRuntimeOperation,
+      before: beforeRuntimeOperation
+    },
     observations: iCloudFileObservations,
     readOverrides: iCloudReadOverrides
   });
@@ -917,6 +1009,9 @@ async function runScriptableScript(options = {}) {
         textFields: clone(this.textFields),
         title: this.title
       });
+
+      // 弹窗快照与用户响应都已确定后再触发同步事件，模拟配置确认期间云端文件刚好到达。
+      afterRuntimeOperation("alertPresent");
 
       // 仅接受已注册动作的下标；负数、非整数及越过动作数组长度的响应都按取消处理。
       if (Number.isInteger(this.response.index) &&

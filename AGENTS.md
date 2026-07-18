@@ -48,7 +48,7 @@
 - 脚本依赖 `args`、`config`、`ListWidget`、`FileManager`、`Request`、`WebView`、`DrawContext`、`SFSymbol`、`Location`、`Script`、`Color`、`Font`、`Image`、`Data`、`Size`、`Rect`、`Point`、`Path` 等 Scriptable 全局 API。
 - 不要引入 Node-only API、浏览器 DOM API、bundler、import/module 语法，除非项目明确迁移运行方式。
 - 脚本会在三类上下文运行：
-  - `config.runsInApp`：配置缺失时进入配置表单；配置完成时先显示“打开 TeslaMate / 管理配置”菜单，仅在用户选择后才打开 WebView。
+  - `config.runsInApp`：配置缺失时先显示“重试同步 / 创建新配置 / 取消”，仅在用户选择创建后进入配置表单；旧设备显示迁移确认；配置完成时先显示“打开 TeslaMate / 管理配置”菜单，仅在用户选择后才打开 WebView。
   - `config.runsInAccessoryWidget`：渲染锁屏圆形电量 widget。
   - 其他 widget 场景：渲染中号桌面 widget。
 - Scriptable widget 刷新频率由 iOS 决定，`refreshAfterDate` 只是最早刷新时间，不保证准点刷新。

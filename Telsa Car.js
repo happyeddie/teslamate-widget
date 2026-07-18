@@ -454,20 +454,20 @@ function tryRemoveConfigArtifact(fm, filePath) {
  *
  * 使用场景：`saveRuntimeConfig()` 每次保存的第一步。入参为同一 iCloud 存储集合与修复
  * 模式；返回 Promise<void>。方法创建固定目录、严格清理旧 pending。普通模式继续收敛或
- * 恢复既有事务工件；`iCloudInvalid` 与 `legacyInvalid` 都把来源约束延后到 pending 完整
- * 校验之后，防止候选未验证时删除无效文件或错误套用其他来源的修复规则。
+ * 恢复既有事务工件；`iCloudInvalid`、`legacyInvalid` 与 `legacyMigration` 都把来源约束
+ * 延后到 pending 完整校验之后，防止候选未验证时删除旧文件或错误套用其他来源规则。
  */
 async function prepareICloudSave(storage, repairMode) {
   // 配置目录只在 App 明确保存时创建，Widget 读取路径永不创建目录。
   if (!storage.fm.isDirectory(storage.directoryPath)) {
-    storage.fm.createDirectory(storage.directoryPath);
+    storage.fm.createDirectory(storage.directoryPath, true);
   }
   // 遗留 pending 必须在新写入前严格删除；清理失败时停止事务，不能依赖覆盖语义。
   if (storage.fm.fileExists(storage.pendingPath)) {
     storage.fm.remove(storage.pendingPath);
   }
 
-  // 显式修复必须先写入并复读 pending；现有工件的验证与删除由后置边界统一完成。
+  // 显式修复或迁移必须先写入并复读 pending；现有工件的检查与删除由后置边界统一完成。
   if (repairMode) {
     return;
   }
@@ -503,18 +503,18 @@ async function prepareICloudSave(storage, repairMode) {
 }
 
 /**
- * 在 pending 已完整校验后重新确认 legacy 修复仍没有任何 iCloud 配置工件。
+ * 在 pending 已完整校验后重新确认 legacy 保存仍没有任何 iCloud 配置工件。
  *
- * 使用场景：旧 Keychain 内容无效时，初次加载已确认正式与 backup 缺失；用户填写表单期间
- * iCloud 仍可能同步出文件。入参为同一 iCloud 存储集合；无正常返回值。两个固定工件都
- * 缺失时允许继续安装候选，任一存在都抛固定内部错误并保留现有文件、旧键及未安装候选。
+ * 使用场景：有效旧配置迁移确认期间或无效旧配置修复表单期间，iCloud 仍可能同步出正式
+ * 文件或 backup。入参为同一 iCloud 存储集合；无正常返回值。两个固定工件都缺失时允许
+ * 继续安装候选；任一存在都抛固定内部错误，并保留云端正文、旧键及未安装候选。
  */
-function verifyICloudArtifactsMissingForLegacyRepair(storage) {
+function verifyICloudArtifactsMissingForLegacySave(storage) {
   const configExists = storage.fm.fileExists(storage.configPath);
   const backupExists = storage.fm.fileExists(storage.backupPath);
-  // legacy 修复没有替换 iCloud 工件的授权；发现任一文件都必须停止而不能判断或删除内容。
+  // legacy 保存没有替换 iCloud 工件的授权；发现任一文件都必须停止而不能判断或删除内容。
   if (configExists || backupExists) {
-    throw new Error("legacy-repair-artifacts-appeared");
+    throw new Error("legacy-save-artifacts-appeared");
   }
 }
 
@@ -566,8 +566,10 @@ async function removeInvalidConfigArtifactsForRepair(storage) {
  *
  * 使用场景：App 表单或旧 Keychain 迁移经用户确认后调用。入参为任意业务配置和可选修复
  * 来源模式；普通保存省略，iCloud 无效工件传 `iCloudInvalid`，旧 Keychain 无效且 iCloud
- * 工件缺失传 `legacyInvalid`。成功返回 `{ ok: true, value }`，value 是完成两次写后读校验
- * 的五字段 envelope；校验或任何 iCloud 步骤失败返回固定脱敏结果。
+ * 工件缺失传 `legacyInvalid`，有效旧 Keychain 确认迁移传 `legacyMigration`。两个 legacy
+ * 模式都必须在 pending 完整校验后、任何正式/backup 移动前重新确认云端工件仍全部缺失。
+ * 成功返回 `{ ok: true, value }`，value 是完成两次写后读校验的五字段 envelope；校验或
+ * 任何 iCloud 步骤失败返回固定脱敏结果。
  * `backupCreatedByTransaction` 仅在正式成功移到 backup 后置位，
  * `candidateInstalled` 仅在 pending 成功安装后置位，失败清理严格依据本次事务状态，绝不
  * 误删未安装候选前的正式文件。方法不使用 Node API，不访问 Keychain。
@@ -608,9 +610,9 @@ async function saveRuntimeConfig(input, repairMode = null) {
     if (repairMode === "iCloudInvalid") {
       await removeInvalidConfigArtifactsForRepair(storage);
     }
-    // legacy 来源没有可替换的 iCloud 工件；pending 验证后必须重新确认两者仍缺失。
-    else if (repairMode === "legacyInvalid") {
-      verifyICloudArtifactsMissingForLegacyRepair(storage);
+    // 两种 legacy 来源都没有替换云端工件的授权；pending 验证后必须重新确认两者仍缺失。
+    else if (repairMode === "legacyInvalid" || repairMode === "legacyMigration") {
+      verifyICloudArtifactsMissingForLegacySave(storage);
     }
 
     // 只有正式确实存在时才创建本次 backup；move 成功后立即置位供 catch 精确恢复。
@@ -885,10 +887,10 @@ async function presentInvalidConfigMenu() {
  * 显示一次性旧 Keychain 配置迁移确认并执行验证后删除。
  *
  * 使用场景：仅 App 在正式与备份都缺失、旧 schema v1 候选有效时调用。入参
- * `legacyConfig` 是只含三个业务字段的白名单候选；用户确认后先走完整 iCloud 保存事务，
- * 再重新从正式文件加载并与保存 envelope 逐字段比较，全部成功后才删除旧键。取消不改
- * 任何存储；保存、复读、比较或删除任一步失败都显示固定“迁移失败”、保留旧键并结束，
- * 不把候选或新正式文件用于本次业务链。
+ * `legacyConfig` 是只含三个业务字段的白名单候选；用户确认后以显式 `legacyMigration`
+ * 模式走完整 iCloud 保存事务，再重新从正式文件加载并与保存 envelope 逐字段比较，全部
+ * 成功后才删除旧键。取消不改任何存储；保存、复读、比较或删除任一步失败都显示固定
+ * “迁移失败”、保留旧键并结束，不把候选或新正式文件用于本次业务链。
  */
 async function presentLegacyMigrationPrompt(legacyConfig) {
   const prompt = new Alert();
@@ -902,7 +904,7 @@ async function presentLegacyMigrationPrompt(legacyConfig) {
     return { status: "unavailable" };
   }
 
-  const saveResult = await saveRuntimeConfig(legacyConfig);
+  const saveResult = await saveRuntimeConfig(legacyConfig, "legacyMigration");
   // iCloud 事务失败时旧键仍是唯一迁移源，必须保留并用固定提示结束本次运行。
   if (!saveResult.ok) {
     await presentMessage("迁移失败", "无法迁移旧配置，请稍后重试");
