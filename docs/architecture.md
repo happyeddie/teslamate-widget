@@ -39,7 +39,8 @@
 - `renderUnavailableConfigWidget()`：任意非 `ready` 配置状态下提交无网络、无缓存副作用的 iCloud 同步提示 Widget。
 - `createRuntimeContext()`：配置门禁通过后才创建缓存目录和正常 Widget。
 - `openTeslaMateWebView()`：使用显式运行配置处理 App 内 TeslaMate 页面展示。
-- `loadCarDataWithCache()`：统一处理 TeslaMateApi 请求和车辆缓存回退。
+- `createTeslaMateStatusUrl()`：兼容服务根地址与已包含 `/api` 的反向代理地址，避免重复 API 路径。
+- `isValidCarDataResponse()` / `loadCarDataWithCache()`：统一验证 TeslaMateApi 与车辆缓存的顶层响应契约，并在请求异常或 JSON 错误对象出现时执行脱敏缓存回退。
 - `loadCarContext()`：组合车辆数据、历史坐标、刷新时间、地理信息和地图。
 - `renderAccessoryWidget()`：绘制并提交锁屏圆形 Widget。
 - `renderMediumWidget()`：组织中号 Widget，并分别调用车辆、电池、充电、控制状态、位置和地图渲染函数。
@@ -78,7 +79,7 @@ flowchart TD
 | 字段 | 含义 |
 | --- | --- |
 | `amapApiKey` | 高德静态地图 Web 服务 API Key |
-| `teslaMateApiBaseUrl` | TeslaMateApi 基础地址；不含 `/api/v1/cars/<carId>/status`，不含 query/hash，保存时去除末尾 `/` |
+| `teslaMateApiBaseUrl` | TeslaMateApi 服务根地址或以 `/api` 结尾的反向代理地址；不含 `/v1/cars/<carId>/status`，不含 query/hash，保存时去除末尾 `/` |
 | `teslaMateWebUrl` | TeslaMate Web 基础地址；不含 query/hash，保存时去除末尾 `/` |
 
 三项内容与 `schemaVersion: 1`、规范化 ISO 8601 `updatedAt` 一起序列化到 Scriptable iCloud documents 的 `teslamate/config.v1.json`。保存只写入这五个白名单字段；`teslamate/` 不存在时通过 `createDirectory(path, true)` 显式递归创建。正式文件以外，保存事务仅可在同目录使用 `config.v1.pending.json` 和 `config.v1.backup.json`。这三个固定文件均不得进入仓库、脚本文本、日志或测试产物。

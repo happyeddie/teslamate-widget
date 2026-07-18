@@ -1280,6 +1280,23 @@ function transformLonWithXY(x, y) {
 }
 
 /**
+ * 拼接 TeslaMateApi 车辆状态接口，并兼容基础地址已包含 `/api` 的部署方式。
+ *
+ * 使用场景：独立端口部署通常保存服务根地址，官方 Traefik 示例则可能保存以 `/api`
+ * 结尾的路径。入参 `runtimeConfig` 已通过 URL 标准化且没有末尾斜杠，`carId` 为纯数字
+ * 车辆 ID；返回完整状态接口 URL。只有路径恰好以 `/api` 结尾时追加 `/v1/...`，其他
+ * 地址追加完整 `/api/v1/...`，避免生成 `/api/api/v1/...`。
+ */
+function createTeslaMateStatusUrl(runtimeConfig, carId) {
+  const baseUrl = runtimeConfig.teslaMateApiBaseUrl;
+  // `/api` 已是路由前缀时只补版本路径；域名根或其他反向代理前缀使用完整 API 路径。
+  const statusPath = baseUrl.endsWith("/api")
+    ? `/v1/cars/${carId}/status`
+    : `/api/v1/cars/${carId}/status`;
+  return `${baseUrl}${statusPath}`;
+}
+
+/**
  * 请求指定车辆的 TeslaMateApi 状态数据。
  *
  * 使用场景：正常 Widget 优先获取最新车辆状态。入参为已验证 runtimeConfig 和数字
@@ -1287,9 +1304,23 @@ function transformLonWithXY(x, y) {
  * 异常原样抛给缓存回退层；请求 URL 由基础地址和车辆 ID 现场拼接。
  */
 async function getCarData(runtimeConfig, carId) {
-  const url = `${runtimeConfig.teslaMateApiBaseUrl}/api/v1/cars/${carId}/status`;
+  const url = createTeslaMateStatusUrl(runtimeConfig, carId);
   let req = await new Request(url);
   return await req.loadJSON();
+}
+
+/**
+ * 判断 JSON 是否具备车辆渲染链要求的顶层 TeslaMateApi 响应结构。
+ *
+ * 使用场景：`Request.loadJSON()` 对可解析的错误 JSON 也会成功返回，不能用“没有抛异常”
+ * 代替业务契约校验。入参可为任意 JSON 值；仅当 `data` 与 `data.status` 都是非数组对象
+ * 时返回 true，其余情况返回 false。本方法不记录或序列化输入，避免上游错误正文泄露。
+ */
+function isValidCarDataResponse(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) &&
+    value.data && typeof value.data === "object" && !Array.isArray(value.data) &&
+    value.data.status && typeof value.data.status === "object" &&
+    !Array.isArray(value.data.status));
 }
 
 /**
@@ -1303,18 +1334,38 @@ async function getCarData(runtimeConfig, carId) {
 async function loadCarDataWithCache(runtimeContext, runtimeConfig, carId, file) {
   const { fm } = runtimeContext;
   try {
-    return await getCarData(runtimeConfig, carId);
+    const remoteData = await getCarData(runtimeConfig, carId);
+    // 可解析 JSON 仍可能是网关、鉴权或 404 错误对象；无效结构必须进入缓存回退。
+    if (isValidCarDataResponse(remoteData)) {
+      return remoteData;
+    }
+    console.log("车辆状态响应无效，尝试读取缓存");
   }
   catch (error) {
     // Request 异常可能携带完整私有 URL，只记录固定分类，绝不输出或继续传播该对象。
     console.log("车辆状态请求失败，尝试读取缓存");
-    // 只有已有缓存时才能离线回退；不存在缓存时保留失败语义但转换为固定脱敏 Error。
-    if (!fm.fileExists(file)) {
-      throw new Error("车辆状态加载失败");
-    }
-    const json = await fm.readString(file);
-    return JSON.parse(json);
   }
+
+  // 只有已有缓存时才能离线回退；不存在缓存时保留失败语义但转换为固定脱敏 Error。
+  if (!fm.fileExists(file)) {
+    throw new Error("车辆状态加载失败");
+  }
+  let cachedData;
+  try {
+    const json = await fm.readString(file);
+    cachedData = JSON.parse(json);
+  }
+  catch (error) {
+    // 缓存正文与解析异常可能携带隐私数据，只输出固定分类并抛出统一业务错误。
+    console.log("车辆缓存读取失败");
+    throw new Error("车辆状态加载失败");
+  }
+  // 缓存也必须通过相同顶层契约，防止历史错误响应或损坏结构延迟到渲染层崩溃。
+  if (!isValidCarDataResponse(cachedData)) {
+    console.log("车辆缓存内容无效");
+    throw new Error("车辆状态加载失败");
+  }
+  return cachedData;
 }
 
 /**

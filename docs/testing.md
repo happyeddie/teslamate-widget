@@ -8,6 +8,7 @@
 - 锁屏 accessory widget 是否能完成圆形电量图构建。
 - 充电、行驶、在线、离线等状态分支是否可执行。
 - TeslaMateApi 失败时是否能读取车辆缓存。
+- TeslaMateApi 返回可解析但缺少 `data.status` 的错误 JSON 时，是否拒绝进入渲染并安全回退缓存。
 - App 内 WebView 分支是否打开 TeslaMate 页面并注入隐藏其他车辆的脚本。
 - 已配置 Widget 的点击 URL 是否携带来源标记，并在进入 App 后跳过管理菜单直接打开 WebView。
 - iOS 尚未刷新点击 URL 的旧 Widget 快照，是否仍能通过 Widget 参数跳过管理菜单。

@@ -44,7 +44,7 @@
 2. 打开 Scriptable 并首次运行脚本。尚未发现配置时，首个菜单会显示“重试同步 / 创建新配置 / 取消”；请按需先重试 iCloud 同步，只有明确选择“创建新配置”后才会进入表单，此前不会请求车辆服务。已经配置过的旧设备会改为显示 Keychain 迁移到 iCloud Drive 的确认提示。
 3. 选择“创建新配置”后，填写以下配置并点击“保存”：
    - **高德 API Key**：高德 Web 服务静态地图请求使用的 Key。
-   - **TeslaMateApi 基础 URL**：只填写服务基础地址，例如 `https://api.example.com`；不要追加 `/api/v1/cars/1/status`，脚本会根据车辆 ID 自动拼接接口路径。
+   - **TeslaMateApi 基础 URL**：填写服务基础地址，例如 `https://api.example.com`；反向代理将服务挂载在 `/api` 时也可填写 `https://example.com/api`。不要追加 `/v1/cars/1/status` 等具体接口，脚本会根据车辆 ID 自动拼接并避免重复 `/api` 前缀。
    - **TeslaMate Web URL**：TeslaMate Web 页面基础地址，例如 `https://teslamate.example.com`。
 4. 在 Scriptable Widget 的参数中传入车辆 ID，例如 `1`。
 5. 如需保留主题标记，可传入 `dark,1` 或 `1,dark`。

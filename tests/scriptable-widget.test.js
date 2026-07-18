@@ -614,6 +614,33 @@ test("车 ID 2 使用配置请求、车辆链接和独立缓存", async (t) => {
 });
 
 /**
+ * 验证 TeslaMateApi 基础地址已带 `/api` 前缀时不会重复拼接路径。
+ *
+ * 使用场景：官方 Traefik 示例把 API 暴露在与 TeslaMate 相同域名的 `/api` 路径，用户
+ * 可能直接保存该地址。入参为 node:test 上下文；无返回值。测试断言请求只包含一个
+ * `/api`，并继续完成车辆渲染。
+ */
+test("TeslaMateApi 基础地址包含 api 前缀时正确拼接状态接口", async (t) => {
+  const apiBaseWithPrefix = `${SENTINEL_API_BASE_URL}/api`;
+  const result = await runScriptableScript({
+    iCloudFiles: {
+      [ICLOUD_CONFIG_PATH]: iCloudConfigJson({ teslaMateApiBaseUrl: apiBaseWithPrefix })
+    },
+    iCloudDownloadedFiles: [ICLOUD_CONFIG_PATH],
+    jsonResponse: apiResponse(carStatus("online")),
+    runsInWidget: true,
+    widgetParameter: "1"
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.ok(result.requests.some((request) =>
+    request.url === `${SENTINEL_API_BASE_URL}/api/v1/cars/1/status`
+  ));
+  assert.equal(result.requests.some((request) => request.url.includes("/api/api/")), false);
+  assert.equal(result.script.completed, true);
+});
+
+/**
  * 静态审计生产脚本不再声明旧配置全局或隐式全局车辆 ID。
  *
  * 使用场景：运行测试只能覆盖已执行分支，源码断言用于阻止旧变量名或调用签名回归。
@@ -2939,6 +2966,60 @@ test("TeslaMate API 失败时可以读取已有车辆缓存继续渲染", async 
   assert.equal(result.script.completed, true);
   assert.equal(result.widget.presented, "medium");
   assert.ok(textValues(result.widget).some((text) => text.includes("Model Y")));
+});
+
+/**
+ * 验证 TeslaMateApi 返回 JSON 错误对象时不会在渲染层解引用 `data.status` 崩溃。
+ *
+ * 使用场景：HTTP 404、反向代理或鉴权层可能返回可解析 JSON，但不符合车辆状态契约。
+ * 入参为 node:test 上下文；无返回值。测试不提供缓存，要求共享加载层记录固定分类并
+ * 抛出脱敏的业务错误，而不是泄露响应正文或产生 `undefined is not an object`。
+ */
+test("TeslaMate API 返回非车辆 JSON 时抛出固定脱敏错误", async (t) => {
+  const error = await captureRuntimeFailure({
+    ...readyICloudFixture(),
+    jsonResponse: { error: "sentinel upstream route not found" },
+    runsInWidget: true,
+    widgetParameter: "1"
+  });
+  const result = error.runtimeResult;
+  cleanupRuntimeDirectories(t, result);
+
+  assert.equal(error.message, "车辆状态加载失败");
+  assert.ok(result.logs.includes("车辆状态响应无效，尝试读取缓存"));
+  assert.equal(JSON.stringify(result).includes("sentinel upstream route not found"), false);
+});
+
+/**
+ * 验证 TeslaMateApi 返回非车辆 JSON 时会复用已有的有效车辆缓存。
+ *
+ * 使用场景：上游以 JSON 错误页响应，但设备仍有上次成功数据。入参为 node:test 上下文；
+ * 无返回值。测试预置合法缓存并断言 Widget 继续渲染缓存车辆，证明结构错误与网络异常
+ * 使用同一离线回退边界。
+ */
+test("TeslaMate API 返回非车辆 JSON 时回退有效缓存", async (t) => {
+  const documentsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "scriptable-invalid-api-cache-"));
+  t.after(() => fs.rmSync(documentsDirectory, { recursive: true, force: true }));
+  const cacheRoot = path.join(documentsDirectory, "tesla");
+  fs.mkdirSync(cacheRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(cacheRoot, "car_data_1.json"),
+    JSON.stringify(apiResponse(carStatus("offline", { display_name: "Cached Contract Car" }))),
+    "utf8"
+  );
+
+  const result = await runScriptableScript({
+    ...readyICloudFixture(),
+    documentsDirectory,
+    jsonResponse: { message: "sentinel invalid contract" },
+    runsInWidget: true,
+    widgetParameter: "1"
+  });
+  cleanupRuntimeDirectories(t, result);
+
+  assert.ok(result.logs.includes("车辆状态响应无效，尝试读取缓存"));
+  assert.ok(textValues(result.widget).some((text) => text.includes("Cached Contract Car")));
+  assert.equal(JSON.stringify(result).includes("sentinel invalid contract"), false);
 });
 
 /**

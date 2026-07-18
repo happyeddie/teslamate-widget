@@ -44,7 +44,7 @@ A [Scriptable](https://scriptable.app/) widget script for TeslaMate. It shows ve
 2. Open Scriptable and run the script once. If no configuration is visible yet, the first menu offers **Retry Sync**, **Create New Configuration**, and **Cancel**. Choose **Create New Configuration** only after retrying iCloud synchronization as needed; the form does not open until you make that choice, and no vehicle-service request is made first. An older configured device instead shows a confirmation before migrating its Keychain configuration to iCloud Drive.
 3. After choosing **Create New Configuration**, enter the following values and tap **Save**:
    - **AMap API Key**: the Web Service key used by the static map request.
-   - **TeslaMateApi Base URL**: the service base address, for example `https://api.example.com`. Do not append `/api/v1/cars/1/status`; the script adds the vehicle path automatically.
+   - **TeslaMateApi Base URL**: the service base address, for example `https://api.example.com`. If a reverse proxy mounts the service under `/api`, `https://example.com/api` is also supported. Do not append a concrete endpoint such as `/v1/cars/1/status`; the script adds the vehicle path and avoids a duplicated `/api` prefix.
    - **TeslaMate Web URL**: the base address of the TeslaMate web interface, for example `https://teslamate.example.com`.
 4. Set the Scriptable widget parameter to the vehicle ID, for example `1`.
 5. If you also want to keep the theme marker, use `dark,1` or `1,dark`.
